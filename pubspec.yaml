@@ -20,8 +20,6 @@ dependencies:
   shared_preferences: ^2.3.2
   share_plus: ^10.1.2
   intl: ^0.19.0
-  flutter_background_service: ^5.0.10
-  flutter_background_service_android: ^6.3.0
   tflite_flutter: ^0.11.0
   wakelock_plus: ^1.2.8
   uuid: ^4.5.0
