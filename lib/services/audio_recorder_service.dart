@@ -1,6 +1,8 @@
 import 'dart:async';
+import 'dart:collection';
 import 'dart:io';
 import 'dart:math' as math;
+import 'dart:typed_data';
 
 import 'package:record/record.dart';
 import 'package:uuid/uuid.dart';
@@ -9,9 +11,10 @@ import '../models/app_settings.dart';
 import '../models/recording.dart';
 import '../utils/categories.dart';
 import 'classifier_service.dart';
+import 'fgs_bridge.dart';
 import 'storage_service.dart';
 
-enum RecorderPhase { idle, listening, capturing, cooldown }
+enum RecorderPhase { idle, listening, capturing }
 
 class SessionStatus {
   final RecorderPhase phase;
@@ -64,38 +67,45 @@ class SessionStatus {
 
 typedef SegmentCallback = void Function(Recording r);
 
-/// Amplitude-triggered recorder. Polls the mic; when the level exceeds the
-/// configured threshold, starts writing a WAV segment. Stops when silence
-/// persists for [_silenceGap] or after [maxSegmentSeconds]. Then waits
-/// [cooldownSeconds] before listening again.
+const int _sampleRate = 16000;
+const int _bytesPerSample = 2;
+const int _bytesPerSecond = _sampleRate * _bytesPerSample;
+
+/// PCM-streaming recorder. Subscribes to raw 16 kHz mono int16 samples from
+/// the mic, keeps a short ring buffer so we can pre-roll when a trigger
+/// fires, and holds the file open while quiet passages pass until a full
+/// post-roll of silence has elapsed.
 class AudioRecorderService {
   final AudioRecorder _recorder = AudioRecorder();
   final StorageService _storage;
   final ClassifierService _classifier;
   final _uuid = const Uuid();
 
-  Timer? _pollTimer;
-  Timer? _endTimer;
+  StreamSubscription<Uint8List>? _sub;
   bool _running = false;
-
-  // Segment state
-  DateTime? _segmentStartedAt;
-  String? _segmentPath;
-  double _peakDb = -100;
-  double _sumDb = 0;
-  int _dbSamples = 0;
-  DateTime? _lastLoudAt;
-  final List<double> _waveform = [];
+  Timer? _endTimer;
+  Timer? _statusTimer;
 
   // Session state
   AppSettings _settings = const AppSettings();
   DateTime? _sessionStartedAt;
   DateTime? _sessionEndsAt;
   int _segmentsCaptured = 0;
-  DateTime? _cooldownUntil;
 
-  static const Duration _pollInterval = Duration(milliseconds: 200);
-  static const Duration _silenceGap = Duration(seconds: 3);
+  // Pre-roll ring buffer of raw PCM bytes — sized to `preRollSeconds`.
+  final Queue<Uint8List> _preRoll = Queue();
+  int _preRollBytes = 0;
+
+  // Capture-in-progress state
+  bool _capturing = false;
+  final List<Uint8List> _captureChunks = [];
+  int _captureBytes = 0;
+  DateTime? _captureStartedAt;
+  DateTime? _lastLoudAt;
+  double _peakDb = -100;
+  double _sumDb = 0;
+  int _dbSamples = 0;
+  final List<double> _waveform = [];
 
   final StreamController<SessionStatus> _statusCtrl =
       StreamController<SessionStatus>.broadcast();
@@ -112,11 +122,21 @@ class AudioRecorderService {
   void addSegmentListener(SegmentCallback cb) => _listeners.add(cb);
   void removeSegmentListener(SegmentCallback cb) => _listeners.remove(cb);
 
-  void _emit() {
-    _statusCtrl.add(_status);
-  }
-
   Future<bool> hasPermission() => _recorder.hasPermission();
+
+  /// Hot-swap the session config. Safe to call whether or not a session is
+  /// running. Threshold, pre-roll length, post-roll, and ignore window all
+  /// take effect immediately.
+  void updateSettings(AppSettings s) {
+    _settings = s;
+    // Shrink the pre-roll buffer if the user reduced pre-roll length.
+    final maxBytes = s.preRollSeconds * _bytesPerSecond;
+    while (_preRollBytes > maxBytes && _preRoll.isNotEmpty) {
+      final head = _preRoll.removeFirst();
+      _preRollBytes -= head.length;
+    }
+    _emit();
+  }
 
   Future<void> start({
     required AppSettings settings,
@@ -131,7 +151,6 @@ class AudioRecorderService {
     _sessionEndsAt = endsAt;
     _segmentsCaptured = 0;
     _running = true;
-    _cooldownUntil = null;
 
     _status = SessionStatus.idle.copyWith(
       phase: RecorderPhase.listening,
@@ -148,255 +167,268 @@ class AudioRecorderService {
       }
     }
 
-    await _beginSegmentRecording();
-    _pollTimer = Timer.periodic(_pollInterval, (_) => _onTick());
+    await FgsBridge.start();
+    final stream = await _recorder.startStream(const RecordConfig(
+      encoder: AudioEncoder.pcm16bits,
+      sampleRate: _sampleRate,
+      numChannels: 1,
+    ));
+    _sub = stream.listen(_onChunk, onError: (_) {}, cancelOnError: false);
+
+    _statusTimer = Timer.periodic(const Duration(seconds: 1), (_) => _emit());
   }
 
   Future<void> stop() async {
     if (!_running) return;
     _running = false;
-    _pollTimer?.cancel();
-    _pollTimer = null;
     _endTimer?.cancel();
     _endTimer = null;
+    _statusTimer?.cancel();
+    _statusTimer = null;
 
     try {
-      final path = await _recorder.stop();
-      // Drop the in-progress segment; nothing worth keeping here.
-      if (path != null) {
-        final f = File(path);
-        if (await f.exists()) {
-          try {
-            await f.delete();
-          } catch (_) {}
-        }
-      }
+      await _sub?.cancel();
     } catch (_) {}
-    _resetSegment();
+    _sub = null;
+    try {
+      await _recorder.stop();
+    } catch (_) {}
+
+    // If we were mid-capture when stop was called, commit what we have if
+    // it's long enough — otherwise discard. We don't want half-finished
+    // segments silently lost.
+    if (_capturing) {
+      await _finalizeCapture(forced: true);
+    }
+    _preRoll.clear();
+    _preRollBytes = 0;
+
+    await FgsBridge.stop();
 
     _status = SessionStatus.idle.copyWith(segmentsCaptured: _segmentsCaptured);
     _emit();
   }
 
-  Future<void> _beginSegmentRecording() async {
-    final path = await _storage.newRecordingPath();
-    _segmentPath = path.replaceAll('.m4a', '.wav');
-    _segmentStartedAt = DateTime.now();
-    _peakDb = -100;
-    _sumDb = 0;
-    _dbSamples = 0;
-    _lastLoudAt = null;
-    _waveform.clear();
-
-    await _recorder.start(
-      const RecordConfig(
-        encoder: AudioEncoder.wav,
-        sampleRate: 16000,
-        numChannels: 1,
-      ),
-      path: _segmentPath!,
-    );
-  }
-
-  void _resetSegment() {
-    _segmentPath = null;
-    _segmentStartedAt = null;
-    _peakDb = -100;
-    _sumDb = 0;
-    _dbSamples = 0;
-    _lastLoudAt = null;
-    _waveform.clear();
-  }
-
-  Future<void> _onTick() async {
+  void _onChunk(Uint8List chunk) {
     if (!_running) return;
     final now = DateTime.now();
+    final db = _computeDb(chunk);
 
-    // Session end?
+    // Session end enforced by timer, but also check here for robustness.
     if (_sessionEndsAt != null && now.isAfter(_sessionEndsAt!)) {
-      await stop();
+      unawaited(stop());
       return;
     }
 
-    // Ignore-first window still active?
     final ignoreEnd =
         _sessionStartedAt!.add(Duration(minutes: _settings.ignoreFirstMinutes));
     final inIgnoreWindow = now.isBefore(ignoreEnd);
 
-    // Cooldown?
-    if (_cooldownUntil != null) {
-      if (now.isBefore(_cooldownUntil!)) {
-        _status = _status.copyWith(
-          phase: RecorderPhase.cooldown,
-          lastAmplitudeDb: -100,
-          ignoreWindow: inIgnoreWindow,
-          remainingIgnore:
-              inIgnoreWindow ? ignoreEnd.difference(now) : Duration.zero,
-        );
-        _emit();
-        return;
-      }
-      _cooldownUntil = null;
-      await _beginSegmentRecording();
-    }
-
-    // Read amplitude.
-    final amp = await _recorder.getAmplitude();
-    final db = amp.current.isFinite ? amp.current : -100.0;
-
     final threshold = _settings.amplitudeThresholdDb;
     final loud = db > threshold;
 
-    _peakDb = math.max(_peakDb, db);
-    _sumDb += db;
-    _dbSamples++;
+    if (_capturing) {
+      _captureChunks.add(chunk);
+      _captureBytes += chunk.length;
+      if (loud) _lastLoudAt = now;
 
-    // Track waveform (normalize -60..0 dB → 0..1)
-    final sample = ((db + 60) / 60).clamp(0.0, 1.0);
-    _waveform.add(sample);
+      _peakDb = math.max(_peakDb, db);
+      _sumDb += db;
+      _dbSamples++;
+      final normalised = ((db + 60) / 60).clamp(0.0, 1.0);
+      _waveform.add(normalised);
 
-    // Don't capture during the ignore window — but keep collecting amplitude
-    // so we can show activity.
-    if (inIgnoreWindow) {
+      final capAge = now.difference(_captureStartedAt!);
+      final silence = _lastLoudAt == null
+          ? capAge
+          : now.difference(_lastLoudAt!);
+      final postRollOver = silence.inSeconds >= _settings.postRollSeconds;
+      final maxReached = capAge.inSeconds >= _settings.maxSegmentSeconds;
+
       _status = _status.copyWith(
-        phase: RecorderPhase.listening,
-        lastAmplitudeDb: db,
-        ignoreWindow: true,
-        remainingIgnore: ignoreEnd.difference(now),
-      );
-      _emit();
-      // Reset segment state so we don't accidentally save part of the
-      // pre-sleep period when the window closes.
-      _lastLoudAt = null;
-      if (_segmentStartedAt != null &&
-          now.difference(_segmentStartedAt!).inSeconds > 30) {
-        await _discardAndRestartSegment();
-      }
-      return;
-    }
-
-    if (loud) {
-      _lastLoudAt ??= now;
-      // Extend the "last loud at" so silence detection waits for quiet.
-      _lastLoudAt = now;
-    }
-
-    final inCapture = _lastLoudAt != null;
-    final segAge = _segmentStartedAt == null
-        ? Duration.zero
-        : now.difference(_segmentStartedAt!);
-
-    if (inCapture) {
-      final silence = now.difference(_lastLoudAt!);
-      if (silence > _silenceGap ||
-          segAge.inSeconds >= _settings.maxSegmentSeconds) {
-        await _finishSegment();
-      } else {
-        _status = _status.copyWith(
-          phase: RecorderPhase.capturing,
-          lastAmplitudeDb: db,
-          ignoreWindow: false,
-          remainingIgnore: Duration.zero,
-        );
-        _emit();
-      }
-    } else {
-      // Listening only. Keep the rolling segment short so we don't waste disk.
-      if (segAge.inSeconds > 10) {
-        await _discardAndRestartSegment();
-      }
-      _status = _status.copyWith(
-        phase: RecorderPhase.listening,
+        phase: RecorderPhase.capturing,
         lastAmplitudeDb: db,
         ignoreWindow: false,
         remainingIgnore: Duration.zero,
       );
-      _emit();
+
+      if (postRollOver || maxReached) {
+        unawaited(_finalizeCapture());
+      }
+      return;
     }
-  }
 
-  Future<void> _discardAndRestartSegment() async {
-    try {
-      final path = await _recorder.stop();
-      if (path != null) {
-        final f = File(path);
-        if (await f.exists()) {
-          try {
-            await f.delete();
-          } catch (_) {}
-        }
-      }
-    } catch (_) {}
-    _resetSegment();
-    await _beginSegmentRecording();
-  }
+    // Not capturing — buffer into pre-roll ring.
+    _pushPreRoll(chunk);
 
-  Future<void> _finishSegment() async {
-    final path = _segmentPath;
-    final startedAt = _segmentStartedAt;
-    if (path == null || startedAt == null) return;
-
-    String? stoppedPath;
-    try {
-      stoppedPath = await _recorder.stop();
-    } catch (_) {}
-    final finalPath = stoppedPath ?? path;
-    final duration = DateTime.now().difference(startedAt);
-
-    if (duration.inSeconds < _settings.minSegmentSeconds) {
-      final f = File(finalPath);
-      if (await f.exists()) {
-        try {
-          await f.delete();
-        } catch (_) {}
-      }
+    if (!inIgnoreWindow && loud) {
+      _beginCapture(now);
     } else {
-      final avgDb = _dbSamples == 0 ? -100.0 : _sumDb / _dbSamples;
-      // Downsample waveform to ~120 points for UI.
-      final wf = _downsample(_waveform, 120);
-
-      SoundCategory cat = SoundCategory.unknown;
-      String catLabel = 'Other';
-      double conf = 0;
-      try {
-        final r = await _classifier.classifyWavFile(finalPath);
-        if (r != null) {
-          cat = r.category;
-          catLabel = r.label;
-          conf = r.confidence;
-        }
-      } catch (_) {}
-
-      final rec = Recording(
-        id: _uuid.v4(),
-        filePath: finalPath,
-        startedAt: startedAt,
-        durationMs: duration.inMilliseconds,
-        peakDb: _peakDb,
-        avgDb: avgDb,
-        category: cat,
-        categoryLabel: catLabel,
-        categoryConfidence: conf,
-        waveform: wf,
+      _status = _status.copyWith(
+        phase: RecorderPhase.listening,
+        lastAmplitudeDb: db,
+        ignoreWindow: inIgnoreWindow,
+        remainingIgnore:
+            inIgnoreWindow ? ignoreEnd.difference(now) : Duration.zero,
       );
-      await _storage.add(rec);
-      _segmentsCaptured++;
-      for (final cb in _listeners) {
-        cb(rec);
+    }
+  }
+
+  void _pushPreRoll(Uint8List chunk) {
+    _preRoll.add(chunk);
+    _preRollBytes += chunk.length;
+    final maxBytes = _settings.preRollSeconds * _bytesPerSecond;
+    while (_preRollBytes > maxBytes && _preRoll.isNotEmpty) {
+      final head = _preRoll.removeFirst();
+      _preRollBytes -= head.length;
+    }
+  }
+
+  void _beginCapture(DateTime now) {
+    _capturing = true;
+    _captureStartedAt =
+        now.subtract(Duration(seconds: _settings.preRollSeconds));
+    _lastLoudAt = now;
+    _captureChunks.clear();
+    _captureBytes = 0;
+    _peakDb = -100;
+    _sumDb = 0;
+    _dbSamples = 0;
+    _waveform.clear();
+
+    // Seed capture with the pre-roll.
+    for (final c in _preRoll) {
+      _captureChunks.add(c);
+      _captureBytes += c.length;
+      final n = c.length ~/ _bytesPerSample;
+      final db = _computeDb(c);
+      _sumDb += db * n;
+      _dbSamples += n;
+      _peakDb = math.max(_peakDb, db);
+      _waveform.add(((db + 60) / 60).clamp(0.0, 1.0));
+    }
+  }
+
+  Future<void> _finalizeCapture({bool forced = false}) async {
+    if (!_capturing) return;
+    _capturing = false;
+    final chunks = List<Uint8List>.from(_captureChunks);
+    final bytes = _captureBytes;
+    final startedAt = _captureStartedAt!;
+    final peak = _peakDb;
+    final avgDb = _dbSamples == 0 ? -100.0 : _sumDb / _dbSamples;
+    final wf = _downsample(_waveform, 120);
+
+    _captureChunks.clear();
+    _captureBytes = 0;
+    _captureStartedAt = null;
+    _lastLoudAt = null;
+    _peakDb = -100;
+    _sumDb = 0;
+    _dbSamples = 0;
+    _waveform.clear();
+
+    final duration = DateTime.now().difference(startedAt);
+    if (duration.inSeconds < _settings.minSegmentSeconds && forced) {
+      // Too short; drop it.
+      return;
+    }
+    if (duration.inSeconds < _settings.minSegmentSeconds) return;
+
+    final path = await _storage.newRecordingPath();
+    final wavPath = path.replaceAll('.m4a', '.wav');
+    final file = File(wavPath);
+    final sink = file.openWrite();
+    try {
+      sink.add(_buildWavHeader(bytes));
+      for (final c in chunks) {
+        sink.add(c);
       }
+      await sink.flush();
+    } finally {
+      await sink.close();
     }
 
-    _resetSegment();
+    SoundCategory cat = SoundCategory.unknown;
+    String catLabel = 'Other';
+    double conf = 0;
+    try {
+      final r = await _classifier.classifyWavFile(wavPath);
+      if (r != null) {
+        cat = r.category;
+        catLabel = r.label;
+        conf = r.confidence;
+      }
+    } catch (_) {}
 
-    // Enter cooldown and leave the mic alone until it ends.
-    _cooldownUntil =
-        DateTime.now().add(Duration(seconds: _settings.cooldownSeconds));
-    _status = _status.copyWith(
-      phase: RecorderPhase.cooldown,
-      segmentsCaptured: _segmentsCaptured,
-      lastAmplitudeDb: -100,
+    final rec = Recording(
+      id: _uuid.v4(),
+      filePath: wavPath,
+      startedAt: startedAt,
+      durationMs: duration.inMilliseconds,
+      peakDb: peak,
+      avgDb: avgDb,
+      category: cat,
+      categoryLabel: catLabel,
+      categoryConfidence: conf,
+      waveform: wf,
     );
+    await _storage.add(rec);
+    _segmentsCaptured++;
+    for (final cb in _listeners) {
+      cb(rec);
+    }
     _emit();
+  }
+
+  /// Compute peak-dBFS of a PCM chunk (int16 LE samples). Peak catches
+  /// transients better than RMS for our amplitude-trigger purposes.
+  double _computeDb(Uint8List chunk) {
+    final n = chunk.length ~/ _bytesPerSample;
+    if (n == 0) return -100;
+    final bd = ByteData.sublistView(chunk);
+    int peak = 0;
+    for (var i = 0; i < n; i++) {
+      final s = bd.getInt16(i * _bytesPerSample, Endian.little).abs();
+      if (s > peak) peak = s;
+    }
+    if (peak == 0) return -100;
+    final norm = peak / 32768.0;
+    return 20 * (math.log(norm) / math.ln10);
+  }
+
+  Uint8List _buildWavHeader(int dataBytes) {
+    final header = ByteData(44);
+    // "RIFF"
+    header.setUint8(0, 0x52);
+    header.setUint8(1, 0x49);
+    header.setUint8(2, 0x46);
+    header.setUint8(3, 0x46);
+    header.setUint32(4, 36 + dataBytes, Endian.little);
+    // "WAVE"
+    header.setUint8(8, 0x57);
+    header.setUint8(9, 0x41);
+    header.setUint8(10, 0x56);
+    header.setUint8(11, 0x45);
+    // "fmt "
+    header.setUint8(12, 0x66);
+    header.setUint8(13, 0x6D);
+    header.setUint8(14, 0x74);
+    header.setUint8(15, 0x20);
+    header.setUint32(16, 16, Endian.little);
+    header.setUint16(20, 1, Endian.little); // PCM
+    header.setUint16(22, 1, Endian.little); // channels
+    header.setUint32(24, _sampleRate, Endian.little);
+    header.setUint32(28, _bytesPerSecond, Endian.little);
+    header.setUint16(32, _bytesPerSample, Endian.little);
+    header.setUint16(34, 16, Endian.little);
+    // "data"
+    header.setUint8(36, 0x64);
+    header.setUint8(37, 0x61);
+    header.setUint8(38, 0x74);
+    header.setUint8(39, 0x61);
+    header.setUint32(40, dataBytes, Endian.little);
+    return header.buffer.asUint8List();
   }
 
   List<double> _downsample(List<double> src, int target) {
@@ -416,9 +448,14 @@ class AudioRecorderService {
     return out;
   }
 
+  void _emit() {
+    _statusCtrl.add(_status);
+  }
+
   void dispose() {
-    _pollTimer?.cancel();
     _endTimer?.cancel();
+    _statusTimer?.cancel();
+    _sub?.cancel();
     _statusCtrl.close();
     _recorder.dispose();
   }

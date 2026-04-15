@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 
 import '../app_services.dart';
 import '../models/app_settings.dart';
+import '../services/fgs_bridge.dart';
 import '../utils/theme.dart';
 
 class SettingsScreen extends StatefulWidget {
@@ -13,6 +14,7 @@ class SettingsScreen extends StatefulWidget {
 
 class _SettingsScreenState extends State<SettingsScreen> {
   AppSettings? _settings;
+  bool _batteryExempt = false;
 
   @override
   void initState() {
@@ -21,13 +23,21 @@ class _SettingsScreenState extends State<SettingsScreen> {
   }
 
   Future<void> _load() async {
-    final s = await AppServices.of(context).settings.load();
-    if (mounted) setState(() => _settings = s);
+    final svc = AppServices.of(context);
+    final s = await svc.settings.load();
+    final b = await FgsBridge.isIgnoringBatteryOptimizations();
+    if (mounted) setState(() {
+      _settings = s;
+      _batteryExempt = b;
+    });
   }
 
   Future<void> _save(AppSettings s) async {
     setState(() => _settings = s);
-    await AppServices.of(context).settings.save(s);
+    final svc = AppServices.of(context);
+    await svc.settings.save(s);
+    // Apply immediately so changes take effect mid-session.
+    svc.recorder.updateSettings(s);
   }
 
   Future<TimeOfDay?> _pickTime(TimeOfDay initial) {
@@ -140,15 +150,27 @@ class _SettingsScreenState extends State<SettingsScreen> {
               ),
               const Divider(height: 1),
               _slider(
-                title: 'Cooldown',
-                value: s.cooldownSeconds.toDouble(),
-                min: 10,
-                max: 180,
-                divisions: 17,
-                valueLabel: '${s.cooldownSeconds}s',
+                title: 'Pre-roll',
+                value: s.preRollSeconds.toDouble(),
+                min: 0,
+                max: 10,
+                divisions: 10,
+                valueLabel: '${s.preRollSeconds}s',
                 onChanged: (v) =>
-                    _save(s.copyWith(cooldownSeconds: v.round())),
-                help: 'Quiet window after each clip',
+                    _save(s.copyWith(preRollSeconds: v.round())),
+                help: 'Capture this many seconds of audio before the trigger',
+              ),
+              const Divider(height: 1),
+              _slider(
+                title: 'Keep recording after noise',
+                value: s.postRollSeconds.toDouble(),
+                min: 5,
+                max: 180,
+                divisions: 35,
+                valueLabel: '${s.postRollSeconds}s',
+                onChanged: (v) =>
+                    _save(s.copyWith(postRollSeconds: v.round())),
+                help: 'How long to keep recording after the last loud sound',
               ),
               const Divider(height: 1),
               _slider(
@@ -165,10 +187,44 @@ class _SettingsScreenState extends State<SettingsScreen> {
             ],
           ),
         ),
+        const SizedBox(height: 20),
+        _sectionTitle('Background'),
+        Card(
+          child: Column(
+            children: [
+              ListTile(
+                leading: Icon(
+                  _batteryExempt ? Icons.check_circle : Icons.battery_alert,
+                  color: _batteryExempt ? AppColors.teal : AppColors.orange,
+                ),
+                title: const Text('Battery optimization'),
+                subtitle: Text(
+                  _batteryExempt
+                      ? 'SnoreLore is allowed to run unrestricted'
+                      : 'Android may kill SnoreLore mid-night. Tap to allow it to run unrestricted.',
+                  style: const TextStyle(
+                      color: AppColors.textMuted, fontSize: 12),
+                ),
+                trailing: _batteryExempt
+                    ? null
+                    : const Icon(Icons.chevron_right,
+                        color: AppColors.textMuted),
+                onTap: _batteryExempt
+                    ? null
+                    : () async {
+                        await FgsBridge.requestIgnoreBatteryOptimizations();
+                        // Recheck after returning from the system prompt.
+                        await Future.delayed(const Duration(seconds: 1));
+                        await _load();
+                      },
+              ),
+            ],
+          ),
+        ),
         const SizedBox(height: 28),
         Center(
           child: Text(
-            'SnoreLore · v0.1',
+            'SnoreLore · v0.2',
             style: TextStyle(
               color: AppColors.textMuted.withValues(alpha: 0.7),
               fontSize: 12,

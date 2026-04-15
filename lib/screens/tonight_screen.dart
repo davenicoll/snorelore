@@ -7,7 +7,10 @@ import 'package:wakelock_plus/wakelock_plus.dart';
 import '../app_services.dart';
 import '../models/app_settings.dart';
 import '../services/audio_recorder_service.dart';
+import '../services/fgs_bridge.dart';
 import '../utils/theme.dart';
+
+enum _BatteryChoice { skip, fix }
 
 class TonightScreen extends StatefulWidget {
   const TonightScreen({super.key});
@@ -47,6 +50,33 @@ class _TonightScreenState extends State<TonightScreen>
     if (mounted) setState(() => _settings = s);
   }
 
+  Future<_BatteryChoice?> _showBatteryPrompt() {
+    return showDialog<_BatteryChoice>(
+      context: context,
+      builder: (_) => AlertDialog(
+        backgroundColor: AppColors.surface,
+        title: const Text('Let SnoreLore run overnight?'),
+        content: const Text(
+          'Android may pause SnoreLore while your screen is off, which would '
+          'miss clips partway through the night. Allow it to run unrestricted?',
+          style: TextStyle(color: AppColors.textMuted),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () =>
+                Navigator.pop(context, _BatteryChoice.skip),
+            child: const Text('Not now'),
+          ),
+          TextButton(
+            onPressed: () => Navigator.pop(context, _BatteryChoice.fix),
+            child: const Text('Allow',
+                style: TextStyle(color: AppColors.accent)),
+          ),
+        ],
+      ),
+    );
+  }
+
   Future<bool> _ensureMicPermission() async {
     var status = await Permission.microphone.status;
     if (!status.isGranted) status = await Permission.microphone.request();
@@ -76,6 +106,18 @@ class _TonightScreenState extends State<TonightScreen>
         );
       }
       return;
+    }
+
+    // Nudge the user to exempt us from battery optimization once, the first
+    // time they start a session. Without this, Android can (and does) kill
+    // the mic connection partway through the night.
+    final exempt = await FgsBridge.isIgnoringBatteryOptimizations();
+    if (!exempt && mounted) {
+      final proceed = await _showBatteryPrompt();
+      if (proceed == _BatteryChoice.fix) {
+        await FgsBridge.requestIgnoreBatteryOptimizations();
+        return; // user just left the app to grant it; let them retap Start
+      }
     }
 
     DateTime? endsAt;
@@ -157,12 +199,6 @@ class _TonightScreenState extends State<TonightScreen>
         subtitle = '${st.lastAmplitudeDb.toStringAsFixed(0)} dB';
         accent = AppColors.accent;
         icon = Icons.fiber_manual_record;
-        break;
-      case RecorderPhase.cooldown:
-        title = 'Cooling down';
-        subtitle = 'Next clip in a moment…';
-        accent = AppColors.orange;
-        icon = Icons.pause_circle_outline;
         break;
     }
 
@@ -310,8 +346,9 @@ class _TonightScreenState extends State<TonightScreen>
                 'Ignoring sounds for the first ${s.ignoreFirstMinutes} min, '
                 'then capturing when the level crosses '
                 '${s.amplitudeThresholdDb.toStringAsFixed(0)} dB. '
-                'Clips can run up to ${s.maxSegmentSeconds}s, with a '
-                '${s.cooldownSeconds}s cooldown between them.',
+                'Each clip includes ${s.preRollSeconds}s before the noise and '
+                'keeps recording for ${s.postRollSeconds}s after the last loud '
+                'sound, capped at ${s.maxSegmentSeconds}s.',
                 style: const TextStyle(
                     color: AppColors.textMuted, fontSize: 12, height: 1.4),
               ),

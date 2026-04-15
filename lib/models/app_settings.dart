@@ -6,7 +6,8 @@ class AppSettings {
   final TimeOfDay endTime;
   final int ignoreFirstMinutes;
   final double sensitivity;
-  final int cooldownSeconds;
+  final int preRollSeconds;
+  final int postRollSeconds;
   final int maxSegmentSeconds;
   final int minSegmentSeconds;
 
@@ -16,7 +17,8 @@ class AppSettings {
     this.endTime = const TimeOfDay(hour: 7, minute: 0),
     this.ignoreFirstMinutes = 20,
     this.sensitivity = 0.5,
-    this.cooldownSeconds = 60,
+    this.preRollSeconds = 2,
+    this.postRollSeconds = 60,
     this.maxSegmentSeconds = 120,
     this.minSegmentSeconds = 2,
   });
@@ -27,7 +29,8 @@ class AppSettings {
     TimeOfDay? endTime,
     int? ignoreFirstMinutes,
     double? sensitivity,
-    int? cooldownSeconds,
+    int? preRollSeconds,
+    int? postRollSeconds,
     int? maxSegmentSeconds,
     int? minSegmentSeconds,
   }) {
@@ -37,7 +40,8 @@ class AppSettings {
       endTime: endTime ?? this.endTime,
       ignoreFirstMinutes: ignoreFirstMinutes ?? this.ignoreFirstMinutes,
       sensitivity: sensitivity ?? this.sensitivity,
-      cooldownSeconds: cooldownSeconds ?? this.cooldownSeconds,
+      preRollSeconds: preRollSeconds ?? this.preRollSeconds,
+      postRollSeconds: postRollSeconds ?? this.postRollSeconds,
       maxSegmentSeconds: maxSegmentSeconds ?? this.maxSegmentSeconds,
       minSegmentSeconds: minSegmentSeconds ?? this.minSegmentSeconds,
     );
@@ -51,7 +55,8 @@ class AppSettings {
         'endMinute': endTime.minute,
         'ignoreFirstMinutes': ignoreFirstMinutes,
         'sensitivity': sensitivity,
-        'cooldownSeconds': cooldownSeconds,
+        'preRollSeconds': preRollSeconds,
+        'postRollSeconds': postRollSeconds,
         'maxSegmentSeconds': maxSegmentSeconds,
         'minSegmentSeconds': minSegmentSeconds,
       };
@@ -68,7 +73,10 @@ class AppSettings {
         ),
         ignoreFirstMinutes: j['ignoreFirstMinutes'] as int? ?? 20,
         sensitivity: (j['sensitivity'] as num?)?.toDouble() ?? 0.5,
-        cooldownSeconds: j['cooldownSeconds'] as int? ?? 60,
+        preRollSeconds: j['preRollSeconds'] as int? ?? 2,
+        // Backward compat: old settings used `cooldownSeconds`, now
+        // interpreted as the post-roll (time to keep recording after silence).
+        postRollSeconds: (j['postRollSeconds'] ?? j['cooldownSeconds']) as int? ?? 60,
         maxSegmentSeconds: j['maxSegmentSeconds'] as int? ?? 120,
         minSegmentSeconds: j['minSegmentSeconds'] as int? ?? 2,
       );
