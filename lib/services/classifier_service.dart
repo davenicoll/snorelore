@@ -221,20 +221,48 @@ class ClassifierService {
         final prev = perCat[cat];
         if (prev == null || score > prev) perCat[cat] = score;
       }
+      // Apply the bedroom prior when picking the segment's dominant
+      // category: snoring/breathing get nudged up, traffic/weather down.
+      // The raw score still governs whether we commit at all (via
+      // `_windowMinConfidence`) so priors can't fabricate signal.
       SoundCategory winCat = SoundCategory.unknown;
-      double winConf = 0;
+      double winRaw = 0;
+      double winPriored = 0;
       perCat.forEach((c, s) {
-        if (s > winConf) {
-          winConf = s;
+        final priored = s * (categoryPrior[c] ?? 1.0);
+        if (priored > winPriored) {
+          winPriored = priored;
+          winRaw = s;
           winCat = c;
         }
       });
-      if (winConf < _windowMinConfidence) winCat = SoundCategory.unknown;
+      if (winRaw < _windowMinConfidence) winCat = SoundCategory.unknown;
       windowCategories.add(winCat);
     }
 
     if (windowCategories.isEmpty) return null;
-    return _pickPrimaryAndTags(maxScores, windowCategories);
+    return _pickPrimaryAndTags(
+      maxScores,
+      _smoothSegments(windowCategories),
+    );
+  }
+
+  /// Smooth an isolated outlier segment: if both neighbours agree on a
+  /// category that differs from the centre, override the centre. Catches
+  /// the single "Cat" band that shows up in five minutes of Snoring
+  /// without overwriting genuine transitions (which would need both
+  /// neighbours to also flip).
+  List<SoundCategory> _smoothSegments(List<SoundCategory> cats) {
+    if (cats.length < 3) return cats;
+    final out = List<SoundCategory>.of(cats);
+    for (var i = 1; i < cats.length - 1; i++) {
+      final prev = cats[i - 1];
+      final next = cats[i + 1];
+      if (prev == next && prev != cats[i]) {
+        out[i] = prev;
+      }
+    }
+    return out;
   }
 
   ClipClassification? _pickPrimaryAndTags(
@@ -254,12 +282,14 @@ class ClassifierService {
     }
     if (best.isEmpty) return null;
 
-    final globalTop = best.values.map((v) => v.$2).reduce(math.max);
+    double prioredScore(SoundCategory cat, double raw) =>
+        raw * (categoryPrior[cat] ?? 1.0);
 
-    // If the entire clip is this noisy, don't commit to a label — these are
-    // the mis-classifications where room tone gets tagged as "Speech" or
-    // "Pet" on the flimsiest of signals.
-    if (globalTop < _primaryMinConfidence) {
+    // Raw (unpriored) top — governs whether we're allowed to commit to
+    // any category at all. Priors can't push a weak signal over the
+    // commit threshold.
+    final rawTop = best.values.map((v) => v.$2).reduce(math.max);
+    if (rawTop < _primaryMinConfidence) {
       return ClipClassification(
         primary: const ClassificationResult(
           category: SoundCategory.unknown,
@@ -271,28 +301,31 @@ class ClassifierService {
       );
     }
 
-    // Primary: highest-priority category whose best score is within
-    // `_priorityFloorRatio` of the globally top-scoring category. Keeps
-    // "Snoring" as the pick even when YAMNet's argmax is a nearby label like
-    // "Cat purring" — but only on genuine near-ties, not on weak noise.
-    final nearTopFloor = globalTop * _priorityFloorRatio;
+    // Priored top — drives the primary pick and the near-top floor. So
+    // on a close Purr/Snoring race, the bedroom prior tips the scale to
+    // Snoring. Pure suppression of implausible nighttime categories.
+    final prioredTop = best.entries
+        .map((e) => prioredScore(e.key, e.value.$2))
+        .reduce(math.max);
+    final nearTopFloor = prioredTop * _priorityFloorRatio;
+
     SoundCategory primaryCat = SoundCategory.unknown;
     (int, double)? primaryHit;
     for (final cat in categoryPriority) {
       final hit = best[cat];
-      if (hit != null && hit.$2 >= nearTopFloor) {
+      if (hit == null) continue;
+      if (prioredScore(cat, hit.$2) >= nearTopFloor) {
         primaryCat = cat;
         primaryHit = hit;
         break;
       }
     }
-    primaryHit ??= best.entries
-        .reduce((a, b) => a.value.$2 >= b.value.$2 ? a : b)
-        .value;
-    if (primaryCat == SoundCategory.unknown) {
-      // Fall back: use the top category as primary regardless of priority.
-      final topEntry = best.entries
-          .reduce((a, b) => a.value.$2 >= b.value.$2 ? a : b);
+    if (primaryHit == null || primaryCat == SoundCategory.unknown) {
+      // Fall back: pick the entry with the highest priored score.
+      final topEntry = best.entries.reduce((a, b) =>
+          prioredScore(a.key, a.value.$2) >= prioredScore(b.key, b.value.$2)
+              ? a
+              : b);
       primaryCat = topEntry.key;
       primaryHit = topEntry.value;
     }
