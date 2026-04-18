@@ -95,13 +95,21 @@ class ClassifierService {
   /// could override the raw top pick; at 0.75 we only reorder on near-ties.
   static const double _priorityFloorRatio = 0.75;
 
-  /// Per-window confidence floor for colouring the waveform. A window below
-  /// this threshold is rendered in the neutral base colour rather than tinted.
+  /// Per-segment confidence floor for colouring the waveform. A segment
+  /// below this threshold is rendered in the neutral base colour rather
+  /// than tinted.
   static const double _windowMinConfidence = 0.15;
 
-  /// Cap the total number of YAMNet inferences per clip. A 2-minute clip at
-  /// ~1 window/s would otherwise run 120+ inferences.
-  static const int _maxWindows = 60;
+  /// Length of one classification segment. The waveform is coloured in
+  /// bands of this size — one dominant category per band.
+  static const int _segmentSeconds = 10;
+  static const int _segmentSamples = _segmentSeconds * 16000;
+
+  /// Cap the total number of YAMNet inferences per clip. For short clips
+  /// we run YAMNet at its native 0.975 s stride within each segment; for
+  /// long clips we thin that stride so the total stays under the cap. A
+  /// 5-minute clip with the default cap runs ~3 inferences per 10 s band.
+  static const int _maxTotalInferences = 90;
 
   Future<ClipClassification?> classifyWavFile(String path) async {
     if (_interp == null) await init();
@@ -114,37 +122,24 @@ class ClassifierService {
     return _classifySamples(samples);
   }
 
-  /// Slides YAMNet's 0.975s input window across the full clip. For each
-  /// window we keep both the per-window dominant category (drives waveform
-  /// colouring) and the per-class max score across all windows (drives the
-  /// clip's primary label and tags). Max across windows is what we want: a
-  /// 40s mostly-quiet clip with one 3s snore should still score high on
-  /// "Snoring".
+  /// Classifies the clip in non-overlapping 10 s segments. Each segment
+  /// becomes one entry in the returned `windowCategories` list, which drives
+  /// the per-band colouring of the waveform. Within each segment we run
+  /// YAMNet multiple times at its native 0.975 s input size and take the
+  /// per-class max, so a 10 s band of mostly-silence with one strong snore
+  /// still scores high on Snoring. The per-clip primary and tags come from
+  /// the max across every inference in the clip — same behaviour as before.
   ClipClassification? _classifySamples(Float32List samples) {
     final interp = _interp;
-    if (interp == null) return null;
+    if (interp == null || samples.isEmpty) return null;
 
-    // Build the list of window start offsets. For short clips we zero-pad a
-    // single frame; otherwise we stride through the audio. If the number of
-    // windows would exceed the cap, we widen the stride so we still cover
-    // the whole clip — we just sample it more coarsely.
-    final starts = <int>[];
-    if (samples.length <= _frame) {
-      starts.add(0);
-    } else {
-      final usable = samples.length - _frame;
-      var step = _frame; // no overlap by default
-      final naive = usable ~/ step + 1;
-      if (naive > _maxWindows) {
-        step = usable ~/ (_maxWindows - 1);
-        if (step < 1) step = 1;
-      }
-      for (var s = 0; s <= usable; s += step) {
-        starts.add(s);
-        if (starts.length >= _maxWindows) break;
-      }
-    }
-    if (starts.isEmpty) return null;
+    final numSegments =
+        math.max(1, (samples.length / _segmentSamples).ceil());
+    // Budget YAMNet inferences across segments so long clips don't explode.
+    // Each segment runs at least 1 inference; short clips run up to ~10
+    // (0.975 s stride inside a 10 s band), long clips thin down.
+    final perSegBudget =
+        math.max(1, _maxTotalInferences ~/ numSegments);
 
     final maxScores = List<double>.filled(521, 0);
     final windowCategories = <SoundCategory>[];
@@ -156,31 +151,69 @@ class ClassifierService {
     final specOut = List.generate(
         1, (_) => List.generate(96, (_) => List<double>.filled(64, 0)));
 
-    for (final start in starts) {
-      Float32List frame;
-      if (samples.length <= _frame) {
-        frame = Float32List(_frame);
-        frame.setRange(0, samples.length, samples);
-      } else {
-        frame = Float32List.sublistView(samples, start, start + _frame);
-      }
-      try {
-        interp.runForMultipleInputs(
-          [[frame]],
-          {0: scoresOut, 1: embOut, 2: specOut},
-        );
-      } catch (_) {
-        return null;
-      }
-      final row = scoresOut[0];
+    for (var seg = 0; seg < numSegments; seg++) {
+      final segStart = seg * _segmentSamples;
+      final segEnd = math.min(segStart + _segmentSamples, samples.length);
+      final segLen = segEnd - segStart;
 
-      // Per-window dominant category: collapse raw classes to our simplified
-      // set by taking each category's best-scoring class within this window.
+      // Accumulate per-class max within this segment across its inferences.
+      final segScores = List<double>.filled(521, 0);
+
+      // Build inference offsets within the segment. For segments shorter
+      // than one YAMNet frame we zero-pad and run once.
+      final inferOffsets = <int>[];
+      if (segLen <= _frame) {
+        inferOffsets.add(0);
+      } else {
+        final usable = segLen - _frame;
+        final budget = math.max(1, perSegBudget);
+        final step = budget > 1
+            ? math.max(_frame ~/ 2, usable ~/ (budget - 1))
+            : usable;
+        for (var off = 0; off <= usable; off += step) {
+          inferOffsets.add(off);
+          if (inferOffsets.length >= budget) break;
+        }
+        if (inferOffsets.isEmpty) inferOffsets.add(0);
+      }
+
+      for (final off in inferOffsets) {
+        Float32List frame;
+        if (segLen <= _frame) {
+          frame = Float32List(_frame);
+          for (var i = 0; i < segLen; i++) {
+            frame[i] = samples[segStart + i];
+          }
+        } else {
+          frame = Float32List.sublistView(
+              samples, segStart + off, segStart + off + _frame);
+        }
+        try {
+          interp.runForMultipleInputs(
+            [[frame]],
+            {0: scoresOut, 1: embOut, 2: specOut},
+          );
+        } catch (_) {
+          return null;
+        }
+        final row = scoresOut[0];
+        for (var k = 0; k < 521; k++) {
+          final s = row[k];
+          if (s > segScores[k]) segScores[k] = s;
+        }
+      }
+
+      // Roll segment max into the clip-wide max for the primary/tag pick.
+      for (var k = 0; k < 521; k++) {
+        if (segScores[k] > maxScores[k]) maxScores[k] = segScores[k];
+      }
+
+      // Per-segment dominant category: collapse raw classes to our simplified
+      // set by taking each category's best-scoring class within this segment.
       final perCat = <SoundCategory, double>{};
       for (var k = 0; k < 521; k++) {
-        final score = row[k];
+        final score = segScores[k];
         if (score <= 0) continue;
-        if (score > maxScores[k]) maxScores[k] = score;
         final cat = k < _labelCategories.length
             ? _labelCategories[k]
             : SoundCategory.unknown;
@@ -200,6 +233,7 @@ class ClassifierService {
       windowCategories.add(winCat);
     }
 
+    if (windowCategories.isEmpty) return null;
     return _pickPrimaryAndTags(maxScores, windowCategories);
   }
 
