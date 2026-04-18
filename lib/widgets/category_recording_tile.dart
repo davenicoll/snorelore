@@ -114,18 +114,23 @@ class _CategoryRecordingTileState extends State<CategoryRecordingTile> {
     );
   }
 
-  /// Per-bar colour list for the waveform.
+  /// Per-bar primary colour list.
   ///
-  /// - In single-bucket mode (category sections), only windows folding
-  ///   into [widget.highlight] are coloured.
-  /// - In multi-colour mode (timeline), every window is coloured by its
-  ///   own display bucket so a clip with both Snoring and Talking shows
-  ///   both colours inline.
+  /// - In single-bucket mode (category sections): a bar is tinted with
+  ///   the section's colour if EITHER the primary or the secondary
+  ///   window category folds into the section's bucket. This means a
+  ///   band that scored top-2 in the section's bucket still lights up
+  ///   under that section, not just where it won outright.
+  /// - In multi-colour mode (timeline): every window is coloured by its
+  ///   primary display bucket. See [_secondarySegmentColors] for the
+  ///   secondary-category tint on the bottom half of each bar.
   ///
   /// Silent / unknown windows always render with the base colour.
   List<Color?> _segmentColors() {
+    final primaryCats = widget.recording.windowCategories;
+    final secondaryCats = widget.recording.windowCategoriesSecondary;
     if (widget.multiColor) {
-      return widget.recording.windowCategories.map<Color?>((c) {
+      return primaryCats.map<Color?>((c) {
         if (c == SoundCategory.unknown || c == SoundCategory.silence) {
           return null;
         }
@@ -133,11 +138,33 @@ class _CategoryRecordingTileState extends State<CategoryRecordingTile> {
       }).toList();
     }
     final info = displayCategoryInfo[widget.highlight]!;
-    return widget.recording.windowCategories.map<Color?>((c) {
+    return List<Color?>.generate(primaryCats.length, (i) {
+      final c1 = primaryCats[i];
+      final c2 = i < secondaryCats.length
+          ? secondaryCats[i]
+          : SoundCategory.unknown;
+      final c1Matches = c1 != SoundCategory.unknown &&
+          c1 != SoundCategory.silence &&
+          displayCategoryOf(c1) == widget.highlight;
+      final c2Matches = c2 != SoundCategory.unknown &&
+          c2 != SoundCategory.silence &&
+          displayCategoryOf(c2) == widget.highlight;
+      return (c1Matches || c2Matches) ? info.color : null;
+    });
+  }
+
+  /// Secondary colour list for multi-colour mode — renders the top-2
+  /// category on the bottom half of each bar. In single-bucket mode
+  /// this is null, so bars stay single-colour.
+  List<Color?>? _secondarySegmentColors() {
+    if (!widget.multiColor) return null;
+    final secondaryCats = widget.recording.windowCategoriesSecondary;
+    if (secondaryCats.isEmpty) return null;
+    return secondaryCats.map<Color?>((c) {
       if (c == SoundCategory.unknown || c == SoundCategory.silence) {
         return null;
       }
-      return displayCategoryOf(c) == widget.highlight ? info.color : null;
+      return displayCategoryInfo[displayCategoryOf(c)]?.color;
     }).toList();
   }
 
@@ -216,6 +243,7 @@ class _CategoryRecordingTileState extends State<CategoryRecordingTile> {
                           painter: WaveformPainter(
                             samples: widget.recording.waveform,
                             segmentColors: _segmentColors(),
+                            segmentColorsSecondary: _secondarySegmentColors(),
                             progress: _progress,
                             baseColor: _waveformBase,
                             unplayedAlpha: 0.35,

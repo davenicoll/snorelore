@@ -101,6 +101,7 @@ class _NightDetailScreenState extends State<NightDetailScreen> {
         categoryConfidence: result.primary.confidence,
         tags: result.tags.map((t) => t.category).toList(),
         windowCategories: result.windowCategories,
+        windowCategoriesSecondary: result.windowCategoriesSecondary,
       );
       await svc.storage.update(updated);
       await _refresh();
@@ -147,8 +148,11 @@ class _NightDetailScreenState extends State<NightDetailScreen> {
   Map<DisplayCategory, List<Recording>> _groupByDisplayCategory() {
     final out = <DisplayCategory, List<Recording>>{};
     for (final r in _recordings) {
-      final buckets =
-          displayCategoriesFor(r.category, r.tags, r.windowCategories);
+      final buckets = displayCategoriesFor(
+        r.category,
+        r.tags,
+        [...r.windowCategories, ...r.windowCategoriesSecondary],
+      );
       for (final d in buckets) {
         out.putIfAbsent(d, () => []).add(r);
       }

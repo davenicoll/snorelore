@@ -30,11 +30,19 @@ class ClipClassification {
   final ClassificationResult primary;
   final List<ClassificationResult> tags;
   final List<SoundCategory> windowCategories;
+  final List<SoundCategory> windowCategoriesSecondary;
   const ClipClassification({
     required this.primary,
     required this.tags,
     required this.windowCategories,
+    this.windowCategoriesSecondary = const [],
   });
+}
+
+class _ClipAgg {
+  final ClassificationResult primary;
+  final List<ClassificationResult> tags;
+  const _ClipAgg({required this.primary, required this.tags});
 }
 
 /// Runs the embedded YAMNet audio classifier. YAMNet expects a mono
@@ -110,18 +118,6 @@ class ClassifierService {
   /// snoring even when the rest of the clip is silent.
   static const int _sustainedWindowBands = 10;
 
-  /// Median filter length applied to each simplified category's per-band
-  /// score sequence. Length 3 kills isolated single-band spikes without
-  /// suppressing 2+-band runs.
-  static const int _medianFilterLen = 3;
-
-  /// Raw (unpriored) per-band commit floor. A band whose winning
-  /// category scores below this is rendered as unknown. Chosen to match
-  /// real-world YAMNet scores for bedroom audio — clear snoring often
-  /// scores 0.12–0.30, quiet snoring dips lower; the median filter
-  /// handles the dips.
-  static const double _bandCommitThreshold = 0.10;
-
   /// Cap the total number of YAMNet inferences per clip. With 2
   /// inferences per 1 s band, 600 covers a 5-minute clip (matches the
   /// recorder's maxSegmentSeconds ceiling). For longer clips bands
@@ -159,8 +155,10 @@ class ClassifierService {
   /// momentary "Purr" firing in an otherwise snoring run) without
   /// suppressing 2+-band runs.
   ///
-  /// Stage 5 — per-band dominant category: priored argmax of the
-  /// median-filtered scores, gated by a 0.10 raw-confidence floor.
+  /// Stage 5 — per-band top-2 dominant categories: priored argmax with
+  /// per-category commit thresholds from `categoryCommitThreshold`, plus
+  /// a clip-primary fallback for bands where nothing passes its floor
+  /// but the clip primary has non-trivial presence at that band.
   ///
   /// Stage 6 — clip-level aggregation: per-category MAX across bands
   /// for events, max-over-rolling-10-band-mean for sustained. Priored
@@ -205,7 +203,11 @@ class ClassifierService {
         continue;
       }
 
-      // Stage 1 — overlapping inferences. Each frame is 0.975 s.
+      // Stage 1 — overlapping inferences. Each frame is 0.975 s. We
+      // aggregate the 2 frames per band via geometric mean per class —
+      // more calibrated than MAX (Kittler/Hatef 1998 on sum/product
+      // combining rules). MAX biases toward whichever frame was noisy.
+      var inferCount = 0;
       for (final off in inferOffsets) {
         final frameStart = bandStart + off;
         if (frameStart >= samples.length) break;
@@ -229,9 +231,17 @@ class ClassifierService {
           return null;
         }
         final row = scoresOut[0];
-        for (var k = 0; k < 521; k++) {
-          if (row[k] > perBandRaw[i][k]) perBandRaw[i][k] = row[k];
+        if (inferCount == 0) {
+          for (var k = 0; k < 521; k++) {
+            perBandRaw[i][k] = row[k];
+          }
+        } else {
+          for (var k = 0; k < 521; k++) {
+            perBandRaw[i][k] =
+                math.sqrt(perBandRaw[i][k] * row[k]);
+          }
         }
+        inferCount++;
       }
     }
 
@@ -254,42 +264,105 @@ class ClassifierService {
       }
     }
 
-    // Stage 4 — median filter the per-category score series.
-    perBandCat = _medianFilterPerCategory(
-        perBandCat, bandSilent, _medianFilterLen);
+    // Stage 4 — median filter the per-category score series, using a
+    // filter length chosen per category.
+    perBandCat = _medianFilterPerCategory(perBandCat, bandSilent);
 
-    // Stage 5 — per-band dominant category. Priored argmax of the
-    // median-filtered scores, gated by the raw-confidence floor. We
-    // tried a per-category hysteresis state machine here but the ON
-    // thresholds it needed to be tight (0.18+ for sustained) were
-    // routinely above real bedroom YAMNet scores, so clips were getting
-    // a clip-level primary without any matching per-band tints. The
-    // median filter already smooths score spikes before this argmax,
-    // which is what the DCASE community recommends as the main
-    // post-processing step.
+    // Stage 5a — compute the clip primary and tags from the filtered
+    // per-band scores BEFORE per-band argmax. We use the primary as a
+    // fallback signal when no category crosses its per-band commit
+    // threshold at a given band (so quiet snoring inside a clip that is
+    // overall clearly Snoring still colours those bands).
+    final clipAgg = _computeClipAggregation(perBandCat);
+    final clipPrimaryCat = clipAgg.primary.category;
+
+    // Stage 5b — per-band top-2 dominant categories.
+    //
+    //   - Priored argmax picks the winner; raw score must pass the
+    //     winner's per-category commit threshold (not a flat 0.10) for
+    //     it to stick.
+    //   - If the winner fails its threshold but the clip primary has
+    //     raw score >= half the primary's threshold at this band, use
+    //     the clip primary as a fallback tint. Otherwise unknown.
+    //   - Secondary is the priored-runner-up, provided its own raw
+    //     score passes its commit threshold. Secondary ≠ primary by
+    //     construction.
     final windowCategories = <SoundCategory>[];
+    final windowCategoriesSecondary = <SoundCategory>[];
     for (var i = 0; i < numBands; i++) {
       if (bandSilent[i]) {
         windowCategories.add(SoundCategory.silence);
+        windowCategoriesSecondary.add(SoundCategory.silence);
         continue;
       }
-      SoundCategory winCat = SoundCategory.unknown;
-      double winRaw = 0;
-      double winPriored = 0;
-      perBandCat[i].forEach((c, raw) {
-        final priored = raw * (categoryPrior[c] ?? 1.0);
-        if (priored > winPriored) {
-          winPriored = priored;
-          winRaw = raw;
-          winCat = c;
+      final (win, winRaw, second, secondRaw) =
+          _topTwoPriored(perBandCat[i]);
+      final winThresh = _thresholdFor(win);
+      final secondThresh = _thresholdFor(second);
+      var committedWin = win;
+      if (winRaw < winThresh) {
+        // Fallback to clip primary if it has non-trivial score here.
+        if (clipPrimaryCat != SoundCategory.unknown) {
+          final primaryRaw = perBandCat[i][clipPrimaryCat] ?? 0.0;
+          final primaryFloor = _thresholdFor(clipPrimaryCat) * 0.5;
+          if (primaryRaw >= primaryFloor) {
+            committedWin = clipPrimaryCat;
+          } else {
+            committedWin = SoundCategory.unknown;
+          }
+        } else {
+          committedWin = SoundCategory.unknown;
         }
-      });
-      if (winRaw < _bandCommitThreshold) winCat = SoundCategory.unknown;
-      windowCategories.add(winCat);
+      }
+      windowCategories.add(committedWin);
+      windowCategoriesSecondary.add(
+        (second != SoundCategory.unknown &&
+                second != committedWin &&
+                secondRaw >= secondThresh)
+            ? second
+            : SoundCategory.unknown,
+      );
     }
 
     if (windowCategories.isEmpty) return null;
-    return _pickPrimaryAndTags(perBandCat, windowCategories);
+    return ClipClassification(
+      primary: clipAgg.primary,
+      tags: clipAgg.tags,
+      windowCategories: windowCategories,
+      windowCategoriesSecondary: windowCategoriesSecondary,
+    );
+  }
+
+  double _thresholdFor(SoundCategory cat) =>
+      categoryCommitThreshold[cat] ?? 0.10;
+
+  /// Top-2 by priored score for a single band. Returns (winner,
+  /// winnerRaw, runnerUp, runnerUpRaw). Raw scores (not priored) so the
+  /// caller can gate by the per-category commit threshold.
+  (SoundCategory, double, SoundCategory, double) _topTwoPriored(
+      Map<SoundCategory, double> bandScores) {
+    SoundCategory win = SoundCategory.unknown;
+    SoundCategory second = SoundCategory.unknown;
+    double winRaw = 0;
+    double winPriored = 0;
+    double secondRaw = 0;
+    double secondPriored = 0;
+    bandScores.forEach((c, raw) {
+      final priored = raw * (categoryPrior[c] ?? 1.0);
+      if (priored > winPriored) {
+        second = win;
+        secondRaw = winRaw;
+        secondPriored = winPriored;
+        win = c;
+        winRaw = raw;
+        winPriored = priored;
+      } else if (priored > secondPriored) {
+        second = c;
+        secondRaw = raw;
+        secondPriored = priored;
+      }
+    });
+    return (win, winRaw, second, secondRaw);
   }
 
   /// Peak-dBFS of the float32 samples in [start, end). Used to short-circuit
@@ -306,21 +379,33 @@ class ClassifierService {
     return 20 * (math.log(peak) / math.ln10);
   }
 
-  /// Median filter per category across bands. Replaces each non-silent
-  /// band's score for a category with the median of its window; silent
-  /// bands are excluded from the window (they contribute no audio
-  /// evidence) and are not written to. Length [filterLen] should be odd;
-  /// 3 is the sweet spot — kills single-band spikes while preserving
-  /// 2+-band runs.
+  /// Median filter per category across bands. Each category uses its
+  /// own filter length from [categoryMedianLen] — punctate events
+  /// (sneeze, cough, alarm) use length 1 so they aren't smoothed away,
+  /// while sustained categories (snoring, breathing) use 3–5 bands so
+  /// brief score dips get pulled back up. This follows the DCASE 2024
+  /// Task 4 baseline's per-class median-filter array.
+  ///
+  /// Silent bands are excluded from the window (they contribute no
+  /// audio evidence) and are not written to.
   List<Map<SoundCategory, double>> _medianFilterPerCategory(
       List<Map<SoundCategory, double>> perBand,
-      List<bool> silent,
-      int filterLen) {
+      List<bool> silent) {
     if (perBand.length < 2) return perBand;
-    final half = filterLen ~/ 2;
     final allCats = <SoundCategory>{for (final m in perBand) ...m.keys};
     final out = List.generate(perBand.length, (_) => <SoundCategory, double>{});
     for (final cat in allCats) {
+      final filterLen = categoryMedianLen[cat] ?? 3;
+      if (filterLen <= 1) {
+        // No smoothing for this category — copy raw scores through.
+        for (var i = 0; i < perBand.length; i++) {
+          if (silent[i]) continue;
+          final v = perBand[i][cat] ?? 0.0;
+          if (v > 0) out[i][cat] = v;
+        }
+        continue;
+      }
+      final half = filterLen ~/ 2;
       for (var i = 0; i < perBand.length; i++) {
         if (silent[i]) continue;
         final vals = <double>[];
@@ -340,21 +425,13 @@ class ClassifierService {
   }
 
 
-  ClipClassification? _pickPrimaryAndTags(
-      List<Map<SoundCategory, double>> perBand,
-      List<SoundCategory> windowCategories) {
-    // Multi-scale clip-level aggregation. For each category:
-    //   - MAX categories (events): take the highest per-band raw score
-    //     anywhere in the clip — a single 1 s band of high-confidence
-    //     sneeze commits the category.
-    //   - MEAN categories (sustained): take the max over rolling 10 s
-    //     window means — 10 s of snoring anywhere in the clip surfaces,
-    //     even if the rest is silent. Using max-of-rolling-mean rather
-    //     than mean-over-whole-clip means a brief snore patch in an
-    //     otherwise quiet clip still gets the right primary.
-    final allCats = <SoundCategory>{
-      for (final m in perBand) ...m.keys,
-    };
+  /// Clip-level aggregation: computes the primary category and tags
+  /// from the per-band per-category score series. MAX across bands for
+  /// event categories, max-of-rolling-10-band-mean for sustained ones,
+  /// priored argmax to pick primary.
+  _ClipAgg _computeClipAggregation(
+      List<Map<SoundCategory, double>> perBand) {
+    final allCats = <SoundCategory>{for (final m in perBand) ...m.keys};
     final clipAgg = <SoundCategory, double>{};
     for (final cat in allCats) {
       final mode = categoryAggregation[cat] ?? CategoryAggregation.max;
@@ -382,28 +459,23 @@ class ClassifierService {
       }
     }
 
-    ClipClassification otherOnly() => ClipClassification(
-          primary: const ClassificationResult(
-            category: SoundCategory.unknown,
-            label: 'Other',
-            confidence: 0,
-          ),
-          tags: const [],
-          windowCategories: windowCategories,
-        );
+    const otherOnly = ClassificationResult(
+      category: SoundCategory.unknown,
+      label: 'Other',
+      confidence: 0,
+    );
 
-    if (clipAgg.isEmpty) return otherOnly();
+    if (clipAgg.isEmpty) {
+      return const _ClipAgg(primary: otherOnly, tags: []);
+    }
 
-    // Raw (unpriored) top gates commitment — priors can shuffle close
-    // contenders but can't push a weak signal over the confidence floor.
     final rawTop = clipAgg.values.reduce(math.max);
-    if (rawTop < _primaryMinConfidence) return otherOnly();
+    if (rawTop < _primaryMinConfidence) {
+      return const _ClipAgg(primary: otherOnly, tags: []);
+    }
 
     double prioredScore(SoundCategory cat, double raw) =>
         raw * (categoryPrior[cat] ?? 1.0);
-
-    // Priored argmax — bedroom priors do all the tie-breaking work. No
-    // separate priority walk: the prior is the mechanism.
     final topEntry = clipAgg.entries.reduce((a, b) =>
         prioredScore(a.key, a.value) >= prioredScore(b.key, b.value)
             ? a
@@ -414,8 +486,6 @@ class ClassifierService {
       confidence: topEntry.value,
     );
 
-    // Tags: other categories whose raw aggregated score crossed the tag
-    // threshold. Sorted high to low, capped so we don't spam the UI.
     final tags = <ClassificationResult>[];
     final entries = clipAgg.entries.toList()
       ..sort((a, b) => b.value.compareTo(a.value));
@@ -432,11 +502,7 @@ class ClassifierService {
       if (tags.length >= 4) break;
     }
 
-    return ClipClassification(
-      primary: primary,
-      tags: tags,
-      windowCategories: windowCategories,
-    );
+    return _ClipAgg(primary: primary, tags: tags);
   }
 
   /// Parses a standard RIFF WAV with PCM 16-bit mono data and returns the
