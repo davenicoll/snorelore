@@ -5,6 +5,7 @@ import 'package:flutter/services.dart';
 
 import 'app_services.dart';
 import 'screens/home_screen.dart';
+import 'services/audio_playback_service.dart';
 import 'services/audio_recorder_service.dart';
 import 'services/classifier_service.dart';
 import 'services/settings_service.dart';
@@ -24,6 +25,7 @@ Future<void> main() async {
   final storage = StorageService();
   final classifier = ClassifierService();
   final recorder = AudioRecorderService(storage, classifier);
+  final playback = AudioPlaybackService();
 
   // Warm up the classifier so the first clip doesn't stall on inference.
   unawaited(classifier.init());
@@ -33,6 +35,7 @@ Future<void> main() async {
     storage: storage,
     classifier: classifier,
     recorder: recorder,
+    playback: playback,
   ));
 }
 
@@ -41,6 +44,7 @@ class SnoreLoreApp extends StatelessWidget {
   final StorageService storage;
   final ClassifierService classifier;
   final AudioRecorderService recorder;
+  final AudioPlaybackService playback;
 
   const SnoreLoreApp({
     super.key,
@@ -48,6 +52,7 @@ class SnoreLoreApp extends StatelessWidget {
     required this.storage,
     required this.classifier,
     required this.recorder,
+    required this.playback,
   });
 
   @override
@@ -57,6 +62,7 @@ class SnoreLoreApp extends StatelessWidget {
       storage: storage,
       classifier: classifier,
       recorder: recorder,
+      playback: playback,
       child: MaterialApp(
         title: 'SnoreLore',
         debugShowCheckedModeBanner: false,

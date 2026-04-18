@@ -1,5 +1,6 @@
 import 'package:flutter/widgets.dart';
 
+import 'services/audio_playback_service.dart';
 import 'services/audio_recorder_service.dart';
 import 'services/classifier_service.dart';
 import 'services/settings_service.dart';
@@ -10,6 +11,7 @@ class AppServices extends InheritedWidget {
   final StorageService storage;
   final ClassifierService classifier;
   final AudioRecorderService recorder;
+  final AudioPlaybackService playback;
 
   const AppServices({
     super.key,
@@ -17,6 +19,7 @@ class AppServices extends InheritedWidget {
     required this.storage,
     required this.classifier,
     required this.recorder,
+    required this.playback,
     required super.child,
   });
 
@@ -31,5 +34,6 @@ class AppServices extends InheritedWidget {
       settings != old.settings ||
       storage != old.storage ||
       classifier != old.classifier ||
-      recorder != old.recorder;
+      recorder != old.recorder ||
+      playback != old.playback;
 }
