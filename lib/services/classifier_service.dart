@@ -260,26 +260,40 @@ class ClassifierService {
     return 20 * (math.log(peak) / math.ln10);
   }
 
-  /// Mode-of-5 filter run in 2 passes. At 1 s bands this is a 5 s context
-  /// smoother — the centre is rewritten when a single other category
-  /// holds a strict majority (≥3) across centre + 2 neighbours either
-  /// side. Event categories (sneeze, cough, alarm…) are never rewritten,
-  /// so a genuine 1–2 second sneeze survives smoothing. Runs of 3+ bands
-  /// of any category are preserved, so real 3 s+ events stay intact.
+  /// Multi-scale mode-voting smoother. For each non-event band, compute
+  /// the dominant category at 1 s, 2 s, 3 s, 5 s, 8 s and 10 s window
+  /// sizes centred on the band. Each scale casts a vote — weighted by
+  /// its size — for whichever category holds a strict majority in its
+  /// window (or for the current band's category if no majority emerges).
+  /// The category with the most weighted votes wins.
+  ///
+  /// Effect:
+  ///   - 1–2 band non-event outliers get smoothed: short scales vote for
+  ///     them but long scales drown them out (weight 8 + 10 beats 1 + 2).
+  ///   - 4+ band non-event runs survive because the mid and long scales
+  ///     also see a majority of the new category.
+  ///   - Event categories (sneeze, cough, alarm…) are never rewritten, so
+  ///     a genuine 1 s band of sneeze stays in the waveform.
+  ///
+  /// One pass is enough: the algorithm already considers up to 10 bands
+  /// of context simultaneously, so there's no carry-over a second pass
+  /// could catch.
   List<SoundCategory> _smoothSegments(List<SoundCategory> cats) {
-    if (cats.length < 3) return cats;
-    var current = List<SoundCategory>.of(cats);
-    for (var pass = 0; pass < 2; pass++) {
-      final snapshot = List<SoundCategory>.of(current);
-      for (var i = 0; i < snapshot.length; i++) {
-        if (eventCategories.contains(snapshot[i])) continue;
-        final lo = math.max(0, i - 2);
-        final hi = math.min(snapshot.length - 1, i + 2);
+    if (cats.length < 2) return cats;
+    const scales = [1, 2, 3, 5, 8, 10];
+    final out = List<SoundCategory>.of(cats);
+    for (var i = 0; i < cats.length; i++) {
+      if (eventCategories.contains(cats[i])) continue;
+      final votes = <SoundCategory, int>{};
+      for (final scale in scales) {
+        final lo = math.max(0, i - (scale - 1) ~/ 2);
+        final hi = math.min(cats.length - 1, i + scale ~/ 2);
+        final windowSize = hi - lo + 1;
         final counts = <SoundCategory, int>{};
         for (var j = lo; j <= hi; j++) {
-          counts[snapshot[j]] = (counts[snapshot[j]] ?? 0) + 1;
+          counts[cats[j]] = (counts[cats[j]] ?? 0) + 1;
         }
-        SoundCategory mode = snapshot[i];
+        SoundCategory mode = cats[i];
         var modeCount = 0;
         counts.forEach((c, n) {
           if (n > modeCount) {
@@ -287,12 +301,25 @@ class ClassifierService {
             mode = c;
           }
         });
-        if (modeCount >= 3 && mode != snapshot[i]) {
-          current[i] = mode;
+        // Require a strict majority of the window. 50/50 or ties fall
+        // back to the current band's category so noisy windows can't
+        // swing the vote unpredictably.
+        if (modeCount * 2 <= windowSize && mode != cats[i]) {
+          mode = cats[i];
         }
+        votes[mode] = (votes[mode] ?? 0) + scale;
       }
+      SoundCategory winner = cats[i];
+      int winnerVotes = votes[cats[i]] ?? 0;
+      votes.forEach((c, v) {
+        if (v > winnerVotes) {
+          winnerVotes = v;
+          winner = c;
+        }
+      });
+      out[i] = winner;
     }
-    return current;
+    return out;
   }
 
   ClipClassification? _pickPrimaryAndTags(
