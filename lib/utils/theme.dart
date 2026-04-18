@@ -11,6 +11,8 @@ class AppColors {
   static const Color teal = Color(0xFF48B3AF);
   static const Color orange = Color(0xFFFF9D23);
   static const Color red = Color(0xFFF93827);
+  static const Color amber = Color(0xFFFFC857);
+  static const Color cyan = Color(0xFF5BE7FF);
   static const Color textMuted = Color(0xFF8B92C9);
 }
 
