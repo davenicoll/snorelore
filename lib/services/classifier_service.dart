@@ -93,8 +93,11 @@ class ClassifierService {
   /// Per-segment confidence floor for colouring the waveform. A segment
   /// below this threshold is rendered in the neutral base colour rather
   /// than tinted. Applied to the raw (unpriored) aggregated score so
-  /// priors can't fabricate signal over the floor.
-  static const double _windowMinConfidence = 0.20;
+  /// priors can't fabricate signal over the floor. Lowered from 0.20 to
+  /// 0.10 so softer sustained signals (whispered snoring, gentle
+  /// breathing) still earn a tint — the bedroom prior and temporal
+  /// smoothing then filter out the noisy ones.
+  static const double _windowMinConfidence = 0.10;
 
   /// Peak amplitude below which a segment is treated as silent regardless
   /// of what YAMNet scored. Measured on the float32 [-1,1] samples as

@@ -1,5 +1,9 @@
 import 'package:flutter/material.dart';
 
+/// How the Night Detail screen lays out a night's clips. Users can flip
+/// between the grouped category sections and a flat chronological list.
+enum NightDetailView { categories, timeline }
+
 class AppSettings {
   final bool autoSchedule;
   final TimeOfDay startTime;
@@ -11,6 +15,7 @@ class AppSettings {
   final int maxSegmentSeconds;
   final int minSegmentSeconds;
   final bool developerMode;
+  final NightDetailView nightDetailView;
 
   const AppSettings({
     this.autoSchedule = false,
@@ -23,6 +28,7 @@ class AppSettings {
     this.maxSegmentSeconds = 120,
     this.minSegmentSeconds = 2,
     this.developerMode = false,
+    this.nightDetailView = NightDetailView.categories,
   });
 
   AppSettings copyWith({
@@ -36,6 +42,7 @@ class AppSettings {
     int? maxSegmentSeconds,
     int? minSegmentSeconds,
     bool? developerMode,
+    NightDetailView? nightDetailView,
   }) {
     return AppSettings(
       autoSchedule: autoSchedule ?? this.autoSchedule,
@@ -48,6 +55,7 @@ class AppSettings {
       maxSegmentSeconds: maxSegmentSeconds ?? this.maxSegmentSeconds,
       minSegmentSeconds: minSegmentSeconds ?? this.minSegmentSeconds,
       developerMode: developerMode ?? this.developerMode,
+      nightDetailView: nightDetailView ?? this.nightDetailView,
     );
   }
 
@@ -64,6 +72,7 @@ class AppSettings {
         'maxSegmentSeconds': maxSegmentSeconds,
         'minSegmentSeconds': minSegmentSeconds,
         'developerMode': developerMode,
+        'nightDetailView': nightDetailView.name,
       };
 
   factory AppSettings.fromJson(Map<String, dynamic> j) => AppSettings(
@@ -85,6 +94,10 @@ class AppSettings {
         maxSegmentSeconds: j['maxSegmentSeconds'] as int? ?? 120,
         minSegmentSeconds: j['minSegmentSeconds'] as int? ?? 2,
         developerMode: j['developerMode'] as bool? ?? false,
+        nightDetailView: NightDetailView.values.firstWhere(
+          (v) => v.name == j['nightDetailView'],
+          orElse: () => NightDetailView.categories,
+        ),
       );
 
   /// Amplitude threshold in dBFS. At sensitivity=0.0 we only pick up loud

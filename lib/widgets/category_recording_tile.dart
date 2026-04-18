@@ -2,17 +2,17 @@ import 'dart:async';
 
 import 'package:flutter/material.dart';
 import 'package:intl/intl.dart';
-import 'package:just_audio/just_audio.dart';
 
+import '../app_services.dart';
 import '../models/recording.dart';
+import '../services/audio_playback_service.dart';
 import '../utils/categories.dart';
 import '../utils/theme.dart';
 import 'waveform_painter.dart';
 
-/// Compact recording row used under a [DisplayCategory] heading on the
-/// Night Detail screen. Header line is the time-of-day and clip duration;
-/// body is a waveform with only the segments whose category maps to
-/// [highlight] tinted, plus an inline play/pause and overflow menu.
+/// Compact recording row. Subscribes to the app-wide [AudioPlaybackService]
+/// so only one clip can ever play at a time and scrubbing resolves on the
+/// real playback position.
 class CategoryRecordingTile extends StatefulWidget {
   final Recording recording;
   final DisplayCategory highlight;
@@ -36,89 +36,64 @@ class CategoryRecordingTile extends StatefulWidget {
 }
 
 class _CategoryRecordingTileState extends State<CategoryRecordingTile> {
-  /// Only one tile can play audio at a time; the previously active tile
-  /// pauses itself when a new one starts.
-  static _CategoryRecordingTileState? _activePlayer;
+  /// Off-white base for untinted bars. Renders brightly against the dark
+  /// card background and makes the category-coloured tints pop when they
+  /// overlay specific segments.
+  static const Color _waveformBase = Color(0xFFE8E6F5);
 
-  static const Color _waveformBase = Color(0xFFA497FF);
-
-  AudioPlayer? _player;
-  StreamSubscription<Duration>? _posSub;
-  StreamSubscription<PlayerState>? _stateSub;
-  Duration _pos = Duration.zero;
-  Duration _dur = Duration.zero;
+  StreamSubscription<PlaybackState>? _sub;
+  PlaybackState _state = PlaybackState.idle;
+  bool _scrubbing = false;
+  double _scrubFraction = 0;
 
   @override
-  void dispose() {
-    _teardown();
-    super.dispose();
-  }
-
-  Future<void> _ensurePlayer() async {
-    if (_player != null) return;
-    final p = AudioPlayer();
-    _player = p;
-    try {
-      final d = await p.setFilePath(widget.recording.filePath);
-      if (!mounted) {
-        await p.dispose();
-        return;
-      }
-      setState(() {
-        _dur = d ?? Duration(milliseconds: widget.recording.durationMs);
+  void initState() {
+    super.initState();
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
+      final svc = AppServices.of(context).playback;
+      _state = svc.state;
+      _sub = svc.state$.listen((s) {
+        if (mounted) setState(() => _state = s);
       });
-    } catch (e) {
-      _player = null;
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('Could not load clip: $e')),
-        );
-      }
-      return;
-    }
-    _posSub = p.positionStream.listen((pos) {
-      if (mounted) setState(() => _pos = pos);
-    });
-    _stateSub = p.playerStateStream.listen((s) {
-      if (s.processingState == ProcessingState.completed) {
-        p.seek(Duration.zero);
-        p.pause();
-      }
       if (mounted) setState(() {});
     });
   }
 
-  Future<void> _teardown() async {
-    await _posSub?.cancel();
-    await _stateSub?.cancel();
-    _posSub = null;
-    _stateSub = null;
-    final p = _player;
-    _player = null;
-    if (_activePlayer == this) _activePlayer = null;
-    try {
-      await p?.dispose();
-    } catch (_) {}
+  @override
+  void dispose() {
+    _sub?.cancel();
+    super.dispose();
+  }
+
+  bool get _isActive => _state.activeClipId == widget.recording.id;
+  bool get _playing => _isActive && _state.playing;
+
+  int get _totalMs => _isActive && _state.duration.inMilliseconds > 0
+      ? _state.duration.inMilliseconds
+      : widget.recording.durationMs;
+
+  double get _progress {
+    if (_scrubbing) return _scrubFraction;
+    if (!_isActive) return 0;
+    if (_totalMs == 0) return 0;
+    return (_state.position.inMilliseconds / _totalMs).clamp(0.0, 1.0);
   }
 
   Future<void> _togglePlay() async {
-    await _ensurePlayer();
-    final p = _player;
-    if (p == null) return;
-    if (p.playing) {
-      await p.pause();
-    } else {
-      final prev = _activePlayer;
-      if (prev != null && prev != this) {
-        try {
-          await prev._player?.pause();
-        } catch (_) {}
-        if (prev.mounted) prev.setState(() {});
-      }
-      _activePlayer = this;
-      await p.play();
-    }
-    if (mounted) setState(() {});
+    final svc = AppServices.of(context).playback;
+    await svc.toggle(widget.recording.id, widget.recording.filePath);
+  }
+
+  Future<void> _seekToFraction(double fraction) async {
+    final svc = AppServices.of(context).playback;
+    await svc.ensureLoaded(widget.recording.id, widget.recording.filePath);
+    final totalMs = svc.state.duration.inMilliseconds > 0
+        ? svc.state.duration.inMilliseconds
+        : widget.recording.durationMs;
+    await svc.seek(
+      Duration(milliseconds: (fraction.clamp(0.0, 1.0) * totalMs).round()),
+    );
   }
 
   /// Per-bar colour list for the waveform. Only windows whose category
@@ -148,13 +123,6 @@ class _CategoryRecordingTileState extends State<CategoryRecordingTile> {
   @override
   Widget build(BuildContext context) {
     final info = displayCategoryInfo[widget.highlight]!;
-    final playing = _player?.playing ?? false;
-    final totalMs = _dur.inMilliseconds == 0
-        ? widget.recording.durationMs
-        : _dur.inMilliseconds;
-    final progress =
-        totalMs == 0 ? 0.0 : _pos.inMilliseconds / totalMs;
-    final showProgress = playing || _pos.inMilliseconds > 0;
 
     return Padding(
       padding: const EdgeInsets.symmetric(vertical: 6, horizontal: 4),
@@ -176,28 +144,58 @@ class _CategoryRecordingTileState extends State<CategoryRecordingTile> {
           Row(
             crossAxisAlignment: CrossAxisAlignment.center,
             children: [
-              Expanded(
-                child: SizedBox(
-                  height: 34,
-                  child: CustomPaint(
-                    size: const Size.fromHeight(34),
-                    painter: WaveformPainter(
-                      samples: widget.recording.waveform,
-                      segmentColors: _segmentColors(),
-                      progress: showProgress ? progress.clamp(0.0, 1.0) : 0,
-                      baseColor: _waveformBase,
-                      unplayedAlpha: 0.35,
-                      barWidth: 1.5,
-                      gap: 1.0,
-                    ),
-                  ),
-                ),
-              ),
-              const SizedBox(width: 6),
               _PlayButton(
-                playing: playing,
+                playing: _playing,
                 color: info.color,
                 onTap: _togglePlay,
+              ),
+              const SizedBox(width: 10),
+              Expanded(
+                child: LayoutBuilder(
+                  builder: (ctx, constraints) {
+                    final width = constraints.maxWidth;
+                    return GestureDetector(
+                      behavior: HitTestBehavior.opaque,
+                      onTapDown: (d) {
+                        final f = d.localPosition.dx / width;
+                        _seekToFraction(f);
+                      },
+                      onHorizontalDragStart: (d) {
+                        setState(() {
+                          _scrubbing = true;
+                          _scrubFraction =
+                              (d.localPosition.dx / width).clamp(0.0, 1.0);
+                        });
+                      },
+                      onHorizontalDragUpdate: (d) {
+                        setState(() {
+                          _scrubFraction =
+                              (d.localPosition.dx / width).clamp(0.0, 1.0);
+                        });
+                      },
+                      onHorizontalDragEnd: (_) async {
+                        final f = _scrubFraction;
+                        setState(() => _scrubbing = false);
+                        await _seekToFraction(f);
+                      },
+                      child: SizedBox(
+                        height: 36,
+                        child: CustomPaint(
+                          size: const Size.fromHeight(36),
+                          painter: WaveformPainter(
+                            samples: widget.recording.waveform,
+                            segmentColors: _segmentColors(),
+                            progress: _progress,
+                            baseColor: _waveformBase,
+                            unplayedAlpha: 0.35,
+                            barWidth: 1.5,
+                            gap: 1.0,
+                          ),
+                        ),
+                      ),
+                    );
+                  },
+                ),
               ),
               PopupMenuButton<String>(
                 icon: const Icon(Icons.more_vert, color: AppColors.textMuted),
