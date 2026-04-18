@@ -12,6 +12,13 @@ class WaveformPainter extends CustomPainter {
   /// classifier detected a specific category.
   final List<Color?>? segmentColors;
 
+  /// Optional secondary colours. When provided, each bar is split
+  /// horizontally: the top half uses [segmentColors]' resolved colour,
+  /// the bottom half uses [segmentColorsSecondary]'s resolved colour.
+  /// A null entry falls back to the primary side, so bands with only
+  /// one category stay single-colour.
+  final List<Color?>? segmentColorsSecondary;
+
   /// Playback progress in [0, 1]. When > 0 the played portion of each bar
   /// is rendered at full opacity and the unplayed portion at [unplayedAlpha]
   /// of its resolved colour.
@@ -30,6 +37,7 @@ class WaveformPainter extends CustomPainter {
   WaveformPainter({
     required this.samples,
     this.segmentColors,
+    this.segmentColorsSecondary,
     this.progress = 0,
     this.baseColor = AppColors.primary,
     this.unplayedAlpha = 0.35,
@@ -44,10 +52,6 @@ class WaveformPainter extends CustomPainter {
     final step = barWidth + gap;
     final barCount = math.max(1, (size.width / step).floor());
 
-    // Resample the waveform to exactly `barCount` values. If the source has
-    // more samples than bars we peak-bucket; if fewer, we stretch by picking
-    // the nearest source sample for each bar. Either way the rendered density
-    // is driven by width, not by how many raw samples the clip produced.
     final bars = List<double>.filled(barCount, 0);
     final n = samples.length;
     if (n <= barCount) {
@@ -71,30 +75,65 @@ class WaveformPainter extends CustomPainter {
     final mid = size.height / 2;
     final progressX = progress * size.width;
     final radius = Radius.circular(barWidth / 2);
-    final segColors = segmentColors;
-    final segCount = segColors?.length ?? 0;
+    final primary = segmentColors;
+    final secondary = segmentColorsSecondary;
+    final primaryCount = primary?.length ?? 0;
+    final secondaryCount = secondary?.length ?? 0;
 
     for (var i = 0; i < barCount; i++) {
       final x = i * step;
       final amp = bars[i].clamp(0.0, 1.0);
       final h = math.max(2.0, amp * size.height);
 
-      Color resolved = baseColor;
-      if (segCount > 0) {
-        final segIdx = ((i * segCount) ~/ barCount).clamp(0, segCount - 1);
-        final seg = segColors![segIdx];
-        if (seg != null) resolved = seg;
+      Color primaryColor = baseColor;
+      if (primaryCount > 0) {
+        final segIdx = ((i * primaryCount) ~/ barCount).clamp(0, primaryCount - 1);
+        final seg = primary![segIdx];
+        if (seg != null) primaryColor = seg;
+      }
+      Color? secondaryColor;
+      if (secondaryCount > 0) {
+        final segIdx =
+            ((i * secondaryCount) ~/ barCount).clamp(0, secondaryCount - 1);
+        final seg = secondary![segIdx];
+        if (seg != null && seg != primaryColor) secondaryColor = seg;
       }
 
       final played = progress > 0 && (x + barWidth / 2) < progressX;
-      final paint = Paint()
-        ..style = PaintingStyle.fill
-        ..color = progress > 0 && !played
-            ? resolved.withValues(alpha: resolved.a * unplayedAlpha)
-            : resolved;
+      Color toRenderAlpha(Color c) => progress > 0 && !played
+          ? c.withValues(alpha: c.a * unplayedAlpha)
+          : c;
 
-      final rect = Rect.fromLTWH(x, mid - h / 2, barWidth, h);
-      canvas.drawRRect(RRect.fromRectAndRadius(rect, radius), paint);
+      if (secondaryColor == null) {
+        // Single-colour bar (common case).
+        final paint = Paint()
+          ..style = PaintingStyle.fill
+          ..color = toRenderAlpha(primaryColor);
+        final rect = Rect.fromLTWH(x, mid - h / 2, barWidth, h);
+        canvas.drawRRect(RRect.fromRectAndRadius(rect, radius), paint);
+      } else {
+        // Dual colour: primary on top half (above centreline), secondary
+        // on bottom half. The halves share the rounded outer corners but
+        // meet on the centreline.
+        final topRect = Rect.fromLTWH(x, mid - h / 2, barWidth, h / 2);
+        final bottomRect = Rect.fromLTWH(x, mid, barWidth, h / 2);
+        final topPaint = Paint()
+          ..style = PaintingStyle.fill
+          ..color = toRenderAlpha(primaryColor);
+        final bottomPaint = Paint()
+          ..style = PaintingStyle.fill
+          ..color = toRenderAlpha(secondaryColor);
+        canvas.drawRRect(
+          RRect.fromRectAndCorners(topRect,
+              topLeft: radius, topRight: radius),
+          topPaint,
+        );
+        canvas.drawRRect(
+          RRect.fromRectAndCorners(bottomRect,
+              bottomLeft: radius, bottomRight: radius),
+          bottomPaint,
+        );
+      }
     }
 
     if (progress > 0 && progress < 1) {
@@ -113,7 +152,8 @@ class WaveformPainter extends CustomPainter {
       old.unplayedAlpha != unplayedAlpha ||
       old.barWidth != barWidth ||
       old.gap != gap ||
-      !_sameSegments(old.segmentColors, segmentColors);
+      !_sameSegments(old.segmentColors, segmentColors) ||
+      !_sameSegments(old.segmentColorsSecondary, segmentColorsSecondary);
 
   static bool _sameSegments(List<Color?>? a, List<Color?>? b) {
     if (identical(a, b)) return true;

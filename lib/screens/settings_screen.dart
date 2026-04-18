@@ -167,6 +167,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
             categoryConfidence: result.primary.confidence,
             tags: result.tags.map((t) => t.category).toList(),
             windowCategories: result.windowCategories,
+            windowCategoriesSecondary: result.windowCategoriesSecondary,
           );
           await svc.storage.update(updated);
         }
@@ -230,6 +231,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
               categoryConfidence: 0,
               tags: const [],
               windowCategories: const [],
+              windowCategoriesSecondary: const [],
             ))
         .toList();
     await svc.storage.replaceAll(wiped);

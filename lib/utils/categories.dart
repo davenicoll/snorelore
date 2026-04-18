@@ -319,7 +319,9 @@ const Map<SoundCategory, double> categoryPrior = {
   SoundCategory.snoring: 1.5,
   SoundCategory.breathing: 1.3,
   SoundCategory.movementBed: 1.3,
-  SoundCategory.speech: 1.2,
+  // Speech is known to over-fire on bedroom audio (community finding on the
+  // Google AI forum / arXiv 2310.13759), so we leave it neutral.
+  SoundCategory.speech: 1.0,
   SoundCategory.whisper: 1.2,
 
   // Semi-common
@@ -524,3 +526,87 @@ Set<DisplayCategory> displayCategoriesFor(
   }
   return out;
 }
+
+/// Per-category commit threshold for the per-band argmax. YAMNet's raw
+/// softmax scores are NOT comparable across classes (confirmed in its
+/// own README), so a single flat 0.10 floor was systematically wrong:
+/// Snoring often scores 0.06–0.15 on quiet bedroom audio, while events
+/// like Sneeze score 0.3–0.6 when they fire. Per-category thresholds are
+/// the DCASE 2024 Task 4 baseline approach — its YAML ships 27
+/// class-specific thresholds. Numbers below are informed by that
+/// baseline + anecdotal bedroom YAMNet score distributions.
+const Map<SoundCategory, double> categoryCommitThreshold = {
+  // Sustained: scores are often modest, so floors are low.
+  SoundCategory.snoring: 0.05,
+  SoundCategory.breathing: 0.04,
+  SoundCategory.speech: 0.08,
+  SoundCategory.whisper: 0.06,
+  SoundCategory.traffic: 0.08,
+  SoundCategory.weather: 0.10,
+  SoundCategory.music: 0.10,
+  SoundCategory.movementBed: 0.08,
+  // Events: one strong frame is the signal, so floors are higher to
+  // avoid committing on YAMNet noise.
+  SoundCategory.sneeze: 0.15,
+  SoundCategory.cough: 0.12,
+  SoundCategory.fart: 0.15,
+  SoundCategory.laugh: 0.12,
+  SoundCategory.cry: 0.12,
+  SoundCategory.scream: 0.15,
+  SoundCategory.passion: 0.12,
+  SoundCategory.alarmClock: 0.12,
+  SoundCategory.alarmHousehold: 0.15,
+  SoundCategory.siren: 0.15,
+  SoundCategory.phone: 0.12,
+  SoundCategory.doorbell: 0.12,
+  SoundCategory.cat: 0.10,
+  SoundCategory.dog: 0.10,
+  SoundCategory.walking: 0.10,
+  // Legacy / meta
+  SoundCategory.animal: 0.10,
+  SoundCategory.alarm: 0.12,
+  SoundCategory.movement: 0.08,
+  SoundCategory.silence: 1.0, // never committed via argmax
+  SoundCategory.unknown: 1.0,
+};
+
+/// Per-category median-filter length (in bands) applied to the per-band
+/// score time series before argmax. DCASE 2024 Task 4 baseline ships a
+/// 27-class median-filter array with values from 1 (Speech — no
+/// smoothing) to 17 (sustained background sounds). Our bands are 1 s so
+/// these values directly translate to seconds of context.
+const Map<SoundCategory, int> categoryMedianLen = {
+  // Sustained sounds — smooth across a few seconds to suppress brief
+  // score dips without losing the run.
+  SoundCategory.snoring: 5,
+  SoundCategory.breathing: 5,
+  SoundCategory.traffic: 5,
+  SoundCategory.weather: 5,
+  SoundCategory.music: 5,
+  SoundCategory.movementBed: 3,
+  // Short vocalisations — no smoothing (DCASE uses length 1 for Speech).
+  SoundCategory.speech: 1,
+  SoundCategory.whisper: 1,
+  // Punctate events — never smooth (a 1-band event must survive).
+  SoundCategory.sneeze: 1,
+  SoundCategory.cough: 1,
+  SoundCategory.fart: 1,
+  SoundCategory.laugh: 1,
+  SoundCategory.cry: 3,
+  SoundCategory.scream: 1,
+  SoundCategory.passion: 3,
+  SoundCategory.alarmClock: 1,
+  SoundCategory.alarmHousehold: 1,
+  SoundCategory.siren: 3,
+  SoundCategory.phone: 1,
+  SoundCategory.doorbell: 1,
+  SoundCategory.cat: 3,
+  SoundCategory.dog: 3,
+  SoundCategory.walking: 3,
+  // Legacy
+  SoundCategory.animal: 3,
+  SoundCategory.alarm: 1,
+  SoundCategory.movement: 3,
+  SoundCategory.silence: 1,
+  SoundCategory.unknown: 1,
+};

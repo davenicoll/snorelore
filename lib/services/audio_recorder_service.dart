@@ -379,6 +379,7 @@ class AudioRecorderService {
     double conf = 0;
     List<SoundCategory> tags = const [];
     List<SoundCategory> windowCats = const [];
+    List<SoundCategory> windowCatsSecondary = const [];
     try {
       final r = await _classifier.classifyWavFile(wavPath);
       if (r != null) {
@@ -387,6 +388,7 @@ class AudioRecorderService {
         conf = r.primary.confidence;
         tags = r.tags.map((t) => t.category).toList();
         windowCats = r.windowCategories;
+        windowCatsSecondary = r.windowCategoriesSecondary;
       }
     } catch (_) {}
 
@@ -403,6 +405,7 @@ class AudioRecorderService {
       tags: tags,
       waveform: wf,
       windowCategories: windowCats,
+      windowCategoriesSecondary: windowCatsSecondary,
     );
     await _storage.add(rec);
     _segmentsCaptured++;

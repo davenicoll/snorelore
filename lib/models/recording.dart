@@ -13,6 +13,7 @@ class Recording {
   final List<SoundCategory> tags;
   final List<double> waveform;
   final List<SoundCategory> windowCategories;
+  final List<SoundCategory> windowCategoriesSecondary;
 
   const Recording({
     required this.id,
@@ -27,6 +28,7 @@ class Recording {
     this.tags = const [],
     required this.waveform,
     this.windowCategories = const [],
+    this.windowCategoriesSecondary = const [],
   });
 
   Recording copyWith({
@@ -35,6 +37,7 @@ class Recording {
     double? categoryConfidence,
     List<SoundCategory>? tags,
     List<SoundCategory>? windowCategories,
+    List<SoundCategory>? windowCategoriesSecondary,
   }) =>
       Recording(
         id: id,
@@ -49,6 +52,8 @@ class Recording {
         tags: tags ?? this.tags,
         waveform: waveform,
         windowCategories: windowCategories ?? this.windowCategories,
+        windowCategoriesSecondary:
+            windowCategoriesSecondary ?? this.windowCategoriesSecondary,
       );
 
   /// The "night" key for grouping. Sounds between noon and midnight are
@@ -76,6 +81,8 @@ class Recording {
         'tags': tags.map((t) => t.name).toList(),
         'waveform': waveform,
         'windowCategories': windowCategories.map((c) => c.name).toList(),
+        'windowCategoriesSecondary':
+            windowCategoriesSecondary.map((c) => c.name).toList(),
       };
 
   factory Recording.fromJson(Map<String, dynamic> j) => Recording(
@@ -107,5 +114,12 @@ class Recording {
                   orElse: () => SoundCategory.unknown,
                 ))
             .toList(),
+        windowCategoriesSecondary:
+            ((j['windowCategoriesSecondary'] as List?) ?? const [])
+                .map((e) => SoundCategory.values.firstWhere(
+                      (c) => c.name == e,
+                      orElse: () => SoundCategory.unknown,
+                    ))
+                .toList(),
       );
 }
