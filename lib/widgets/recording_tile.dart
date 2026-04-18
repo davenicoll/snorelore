@@ -30,6 +30,10 @@ class RecordingTile extends StatefulWidget {
 }
 
 class _RecordingTileState extends State<RecordingTile> {
+  /// Which tile is currently playing audio. When a new tile starts
+  /// playback we pause this one, so only one clip plays at a time.
+  static _RecordingTileState? _activePlayer;
+
   bool _expanded = false;
   AudioPlayer? _player;
   StreamSubscription<Duration>? _posSub;
@@ -38,6 +42,9 @@ class _RecordingTileState extends State<RecordingTile> {
   Duration _dur = Duration.zero;
   bool _scrubbing = false;
   double _scrubTarget = 0;
+
+  /// Light purple base colour for unclassified portions of the waveform.
+  static const Color _waveformBase = Color(0xFFA497FF);
 
   @override
   void dispose() {
@@ -90,6 +97,7 @@ class _RecordingTileState extends State<RecordingTile> {
     _stateSub = null;
     final p = _player;
     _player = null;
+    if (_activePlayer == this) _activePlayer = null;
     try {
       await p?.dispose();
     } catch (_) {}
@@ -107,6 +115,14 @@ class _RecordingTileState extends State<RecordingTile> {
     if (p.playing) {
       await p.pause();
     } else {
+      final prev = _activePlayer;
+      if (prev != null && prev != this) {
+        try {
+          await prev._player?.pause();
+        } catch (_) {}
+        if (prev.mounted) prev.setState(() {});
+      }
+      _activePlayer = this;
       await p.play();
     }
     if (mounted) setState(() {});
@@ -118,6 +134,19 @@ class _RecordingTileState extends State<RecordingTile> {
     return '$mm:$ss';
   }
 
+  /// Build the per-segment colour overlay from the recording's
+  /// per-window categories. Null entries mean "use the base colour" — they
+  /// correspond to windows where no category scored above the classifier's
+  /// confidence floor.
+  List<Color?>? _segmentColors(Recording r) {
+    if (r.windowCategories.isEmpty) return null;
+    return r.windowCategories
+        .map<Color?>((c) => c == SoundCategory.unknown
+            ? null
+            : categoryInfo[c]?.color)
+        .toList();
+  }
+
   @override
   Widget build(BuildContext context) {
     final r = widget.recording;
@@ -127,6 +156,7 @@ class _RecordingTileState extends State<RecordingTile> {
     final durLabel = dur.inMinutes >= 1
         ? '${dur.inMinutes}m ${(dur.inSeconds % 60).toString().padLeft(2, '0')}s'
         : '${dur.inSeconds}s';
+    final segments = _segmentColors(r);
 
     return Material(
       color: AppColors.surface,
@@ -186,8 +216,8 @@ class _RecordingTileState extends State<RecordingTile> {
                               size: const Size.fromHeight(38),
                               painter: WaveformPainter(
                                 samples: r.waveform,
-                                color:
-                                    info.color.withValues(alpha: 0.9),
+                                segmentColors: segments,
+                                baseColor: _waveformBase,
                                 barWidth: 1.5,
                                 gap: 1.0,
                               ),
@@ -217,7 +247,7 @@ class _RecordingTileState extends State<RecordingTile> {
                   ),
                 ],
               ),
-              if (_expanded) _expandedPlayer(r, info),
+              if (_expanded) _expandedPlayer(r, segments),
             ],
           ),
         ),
@@ -225,7 +255,7 @@ class _RecordingTileState extends State<RecordingTile> {
     );
   }
 
-  Widget _expandedPlayer(Recording r, CategoryInfo info) {
+  Widget _expandedPlayer(Recording r, List<Color?>? segments) {
     final totalMs =
         _dur.inMilliseconds == 0 ? r.durationMs : _dur.inMilliseconds;
     final progressMs =
@@ -272,9 +302,10 @@ class _RecordingTileState extends State<RecordingTile> {
                     size: Size(c.maxWidth, 80),
                     painter: WaveformPainter(
                       samples: r.waveform,
+                      segmentColors: segments,
                       progress: progress.clamp(0.0, 1.0),
-                      color: info.color.withValues(alpha: 0.35),
-                      playedColor: info.color,
+                      baseColor: _waveformBase,
+                      unplayedAlpha: 0.35,
                       barWidth: 2.0,
                       gap: 1.5,
                     ),
@@ -296,14 +327,14 @@ class _RecordingTileState extends State<RecordingTile> {
             ],
           ),
           const SizedBox(height: 10),
-          _playButton(info),
+          _playButton(),
           const SizedBox(height: 6),
         ],
       ),
     );
   }
 
-  Widget _playButton(CategoryInfo info) {
+  Widget _playButton() {
     final playing = _player?.playing ?? false;
     final ready = _player != null;
     return GestureDetector(

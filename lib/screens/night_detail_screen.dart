@@ -85,6 +85,7 @@ class _NightDetailScreenState extends State<NightDetailScreen> {
         categoryLabel: result.primary.label,
         categoryConfidence: result.primary.confidence,
         tags: result.tags.map((t) => t.category).toList(),
+        windowCategories: result.windowCategories,
       );
       await svc.storage.update(updated);
       await _refresh();
