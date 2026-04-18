@@ -30,7 +30,7 @@ class CategoryInfo {
 const Map<SoundCategory, CategoryInfo> categoryInfo = {
   SoundCategory.snoring: CategoryInfo('Snoring', Icons.bedtime, AppColors.primary),
   SoundCategory.passion: CategoryInfo('Passion', Icons.favorite, AppColors.pink),
-  SoundCategory.cough: CategoryInfo('Cough', Icons.sick, AppColors.orange),
+  SoundCategory.cough: CategoryInfo('Coughing', Icons.sick, AppColors.orange),
   SoundCategory.speech: CategoryInfo('Speech', Icons.record_voice_over, AppColors.accent),
   SoundCategory.laugh: CategoryInfo('Laugh', Icons.mood, AppColors.pink),
   SoundCategory.cry: CategoryInfo('Cry', Icons.water_drop, AppColors.teal),

@@ -5,17 +5,34 @@ import '../utils/theme.dart';
 
 class WaveformPainter extends CustomPainter {
   final List<double> samples;
+
+  /// Optional per-segment colour override. Each entry corresponds to an
+  /// equal slice of the clip. Where an entry is null the bar falls back to
+  /// [baseColor]. Used to tint the parts of the waveform where the
+  /// classifier detected a specific category.
+  final List<Color?>? segmentColors;
+
+  /// Playback progress in [0, 1]. When > 0 the played portion of each bar
+  /// is rendered at full opacity and the unplayed portion at [unplayedAlpha]
+  /// of its resolved colour.
   final double progress;
-  final Color color;
-  final Color playedColor;
+
+  /// Base colour for bars that don't fall within a classified segment.
+  final Color baseColor;
+
+  /// Alpha multiplier for bars that haven't been played yet. Ignored when
+  /// [progress] is 0 (i.e. the preview on the collapsed tile).
+  final double unplayedAlpha;
+
   final double barWidth;
   final double gap;
 
   WaveformPainter({
     required this.samples,
+    this.segmentColors,
     this.progress = 0,
-    this.color = AppColors.primary,
-    this.playedColor = AppColors.accent,
+    this.baseColor = AppColors.primary,
+    this.unplayedAlpha = 0.35,
     this.barWidth = 2.0,
     this.gap = 1.0,
   });
@@ -51,32 +68,39 @@ class WaveformPainter extends CustomPainter {
       }
     }
 
-    final paint = Paint()
-      ..style = PaintingStyle.fill
-      ..color = color;
-    final playedPaint = Paint()
-      ..style = PaintingStyle.fill
-      ..color = playedColor;
-
     final mid = size.height / 2;
     final progressX = progress * size.width;
     final radius = Radius.circular(barWidth / 2);
+    final segColors = segmentColors;
+    final segCount = segColors?.length ?? 0;
 
     for (var i = 0; i < barCount; i++) {
       final x = i * step;
       final amp = bars[i].clamp(0.0, 1.0);
       final h = math.max(2.0, amp * size.height);
+
+      Color resolved = baseColor;
+      if (segCount > 0) {
+        final segIdx = ((i * segCount) ~/ barCount).clamp(0, segCount - 1);
+        final seg = segColors![segIdx];
+        if (seg != null) resolved = seg;
+      }
+
+      final played = progress > 0 && (x + barWidth / 2) < progressX;
+      final paint = Paint()
+        ..style = PaintingStyle.fill
+        ..color = progress > 0 && !played
+            ? resolved.withValues(alpha: resolved.a * unplayedAlpha)
+            : resolved;
+
       final rect = Rect.fromLTWH(x, mid - h / 2, barWidth, h);
-      canvas.drawRRect(
-        RRect.fromRectAndRadius(rect, radius),
-        (x + barWidth / 2) < progressX ? playedPaint : paint,
-      );
+      canvas.drawRRect(RRect.fromRectAndRadius(rect, radius), paint);
     }
 
     if (progress > 0 && progress < 1) {
       canvas.drawRect(
         Rect.fromLTWH(progressX - 1, 0, 2, size.height),
-        Paint()..color = playedColor,
+        Paint()..color = baseColor,
       );
     }
   }
@@ -85,8 +109,19 @@ class WaveformPainter extends CustomPainter {
   bool shouldRepaint(covariant WaveformPainter old) =>
       old.progress != progress ||
       old.samples != samples ||
-      old.color != color ||
-      old.playedColor != playedColor ||
+      old.baseColor != baseColor ||
+      old.unplayedAlpha != unplayedAlpha ||
       old.barWidth != barWidth ||
-      old.gap != gap;
+      old.gap != gap ||
+      !_sameSegments(old.segmentColors, segmentColors);
+
+  static bool _sameSegments(List<Color?>? a, List<Color?>? b) {
+    if (identical(a, b)) return true;
+    if (a == null || b == null) return false;
+    if (a.length != b.length) return false;
+    for (var i = 0; i < a.length; i++) {
+      if (a[i] != b[i]) return false;
+    }
+    return true;
+  }
 }

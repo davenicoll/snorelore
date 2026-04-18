@@ -161,6 +161,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
             categoryLabel: result.primary.label,
             categoryConfidence: result.primary.confidence,
             tags: result.tags.map((t) => t.category).toList(),
+            windowCategories: result.windowCategories,
           );
           await svc.storage.update(updated);
         }

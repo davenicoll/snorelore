@@ -18,13 +18,23 @@ class ClassificationResult {
   });
 }
 
-/// Outcome of classifying a whole clip. [primary] is what we show as the
-/// recording's category; [tags] are other categories that also appeared
-/// above a confidence threshold somewhere in the clip.
+/// Outcome of classifying a whole clip.
+///
+/// [primary] is what we show as the recording's category.
+/// [tags] are other categories that also appeared above a confidence
+/// threshold somewhere in the clip.
+/// [windowCategories] is the dominant simplified category per YAMNet window
+/// (roughly one per second of audio), used to colorise the waveform so the
+/// listener can see when in the clip each category actually fired.
 class ClipClassification {
   final ClassificationResult primary;
   final List<ClassificationResult> tags;
-  const ClipClassification({required this.primary, required this.tags});
+  final List<SoundCategory> windowCategories;
+  const ClipClassification({
+    required this.primary,
+    required this.tags,
+    required this.windowCategories,
+  });
 }
 
 /// Runs the embedded YAMNet audio classifier. YAMNet expects a mono
@@ -39,6 +49,7 @@ class ClassifierService {
 
   Interpreter? _interp;
   List<String> _labels = const [];
+  List<SoundCategory> _labelCategories = const [];
   bool _initialising = false;
 
   Future<void> init() async {
@@ -58,6 +69,8 @@ class ClassifierService {
             return parts.length >= 3 ? parts.sublist(2).join(',') : l;
           })
           .toList();
+      _labelCategories =
+          _labels.map((l) => mapYamnetLabel(l)).toList(growable: false);
     } catch (e) {
       // Leave _interp null; the caller will gracefully skip classification.
     } finally {
@@ -67,10 +80,24 @@ class ClassifierService {
 
   bool get ready => _interp != null && _labels.isNotEmpty;
 
-  /// Score at which a non-primary category is promoted to a tag on the clip.
-  /// YAMNet scores are softmax probabilities across 521 classes, so anything
-  /// approaching 0.1 is already a reasonably strong signal.
-  static const double _tagThreshold = 0.10;
+  /// Confidence floor for promoting a non-primary category onto the clip as
+  /// a tag. YAMNet scores are softmax probabilities across 521 classes, so
+  /// anything approaching 0.2 is a reasonably strong signal.
+  static const double _tagThreshold = 0.20;
+
+  /// Below this, we refuse to commit to any category and the clip is filed
+  /// as "Other". Picking a noisy top category for a clip that's really just
+  /// room tone produces the mis-labels the user is seeing.
+  static const double _primaryMinConfidence = 0.10;
+
+  /// How close a category's best score must be to the globally top-scoring
+  /// category before we allow priority to swap it in. At 0.5 almost anything
+  /// could override the raw top pick; at 0.75 we only reorder on near-ties.
+  static const double _priorityFloorRatio = 0.75;
+
+  /// Per-window confidence floor for colouring the waveform. A window below
+  /// this threshold is rendered in the neutral base colour rather than tinted.
+  static const double _windowMinConfidence = 0.15;
 
   /// Cap the total number of YAMNet inferences per clip. A 2-minute clip at
   /// ~1 window/s would otherwise run 120+ inferences.
@@ -87,9 +114,12 @@ class ClassifierService {
     return _classifySamples(samples);
   }
 
-  /// Slides YAMNet's 0.975s input window across the full clip and keeps the
-  /// per-class max score. Max (not average) is what we want: a 40s mostly-
-  /// quiet clip with one 3s snore should still score high on "Snoring".
+  /// Slides YAMNet's 0.975s input window across the full clip. For each
+  /// window we keep both the per-window dominant category (drives waveform
+  /// colouring) and the per-class max score across all windows (drives the
+  /// clip's primary label and tags). Max across windows is what we want: a
+  /// 40s mostly-quiet clip with one 3s snore should still score high on
+  /// "Snoring".
   ClipClassification? _classifySamples(Float32List samples) {
     final interp = _interp;
     if (interp == null) return null;
@@ -117,6 +147,7 @@ class ClassifierService {
     if (starts.isEmpty) return null;
 
     final maxScores = List<double>.filled(521, 0);
+    final windowCategories = <SoundCategory>[];
 
     // Reusable output buffers — TFLite needs the exact shape each call, but
     // we can let Dart reuse the lists.
@@ -142,15 +173,38 @@ class ClassifierService {
         return null;
       }
       final row = scoresOut[0];
+
+      // Per-window dominant category: collapse raw classes to our simplified
+      // set by taking each category's best-scoring class within this window.
+      final perCat = <SoundCategory, double>{};
       for (var k = 0; k < 521; k++) {
-        if (row[k] > maxScores[k]) maxScores[k] = row[k];
+        final score = row[k];
+        if (score <= 0) continue;
+        if (score > maxScores[k]) maxScores[k] = score;
+        final cat = k < _labelCategories.length
+            ? _labelCategories[k]
+            : SoundCategory.unknown;
+        if (cat == SoundCategory.unknown) continue;
+        final prev = perCat[cat];
+        if (prev == null || score > prev) perCat[cat] = score;
       }
+      SoundCategory winCat = SoundCategory.unknown;
+      double winConf = 0;
+      perCat.forEach((c, s) {
+        if (s > winConf) {
+          winConf = s;
+          winCat = c;
+        }
+      });
+      if (winConf < _windowMinConfidence) winCat = SoundCategory.unknown;
+      windowCategories.add(winCat);
     }
 
-    return _pickPrimaryAndTags(maxScores);
+    return _pickPrimaryAndTags(maxScores, windowCategories);
   }
 
-  ClipClassification? _pickPrimaryAndTags(List<double> maxScores) {
+  ClipClassification? _pickPrimaryAndTags(
+      List<double> maxScores, List<SoundCategory> windowCategories) {
     // Per-category aggregation: for each of our simplified categories, keep
     // the best-scoring raw YAMNet label that maps to it.
     final best = <SoundCategory, (int, double)>{};
@@ -166,11 +220,28 @@ class ClassifierService {
     }
     if (best.isEmpty) return null;
 
-    // Primary: highest-priority category whose best score is within 50% of
-    // the globally top-scoring category. Keeps "Snoring" as the pick even
-    // when YAMNet's argmax is a nearby "Cat purring".
     final globalTop = best.values.map((v) => v.$2).reduce(math.max);
-    final nearTopFloor = globalTop * 0.5;
+
+    // If the entire clip is this noisy, don't commit to a label — these are
+    // the mis-classifications where room tone gets tagged as "Speech" or
+    // "Pet" on the flimsiest of signals.
+    if (globalTop < _primaryMinConfidence) {
+      return ClipClassification(
+        primary: const ClassificationResult(
+          category: SoundCategory.unknown,
+          label: 'Other',
+          confidence: 0,
+        ),
+        tags: const [],
+        windowCategories: windowCategories,
+      );
+    }
+
+    // Primary: highest-priority category whose best score is within
+    // `_priorityFloorRatio` of the globally top-scoring category. Keeps
+    // "Snoring" as the pick even when YAMNet's argmax is a nearby label like
+    // "Cat purring" — but only on genuine near-ties, not on weak noise.
+    final nearTopFloor = globalTop * _priorityFloorRatio;
     SoundCategory primaryCat = SoundCategory.unknown;
     (int, double)? primaryHit;
     for (final cat in categoryPriority) {
@@ -184,6 +255,13 @@ class ClassifierService {
     primaryHit ??= best.entries
         .reduce((a, b) => a.value.$2 >= b.value.$2 ? a : b)
         .value;
+    if (primaryCat == SoundCategory.unknown) {
+      // Fall back: use the top category as primary regardless of priority.
+      final topEntry = best.entries
+          .reduce((a, b) => a.value.$2 >= b.value.$2 ? a : b);
+      primaryCat = topEntry.key;
+      primaryHit = topEntry.value;
+    }
     final primary = ClassificationResult(
       category: primaryCat,
       label: primaryHit.$1 < _labels.length ? _labels[primaryHit.$1] : 'Unknown',
@@ -210,7 +288,11 @@ class ClassifierService {
       if (tags.length >= 4) break;
     }
 
-    return ClipClassification(primary: primary, tags: tags);
+    return ClipClassification(
+      primary: primary,
+      tags: tags,
+      windowCategories: windowCategories,
+    );
   }
 
   /// Parses a standard RIFF WAV with PCM 16-bit mono data and returns the
