@@ -100,6 +100,7 @@ class _NightDetailScreenState extends State<NightDetailScreen> {
   }
 
   Future<void> _deleteAll() async {
+    final services = AppServices.of(context);
     final ok = await showDialog<bool>(
       context: context,
       builder: (_) => AlertDialog(
@@ -124,7 +125,7 @@ class _NightDetailScreenState extends State<NightDetailScreen> {
       ),
     );
     if (ok != true) return;
-    await AppServices.of(context).storage.deleteMany(_recordings);
+    await services.storage.deleteMany(_recordings);
     if (mounted) Navigator.pop(context);
   }
 
@@ -152,7 +153,7 @@ class _NightDetailScreenState extends State<NightDetailScreen> {
             : ListView.separated(
                 padding: const EdgeInsets.fromLTRB(16, 8, 16, 24),
                 itemCount: _recordings.length,
-                separatorBuilder: (_, __) => const SizedBox(height: 10),
+                separatorBuilder: (_, _) => const SizedBox(height: 10),
                 itemBuilder: (_, i) {
                   final r = _recordings[i];
                   return RecordingTile(

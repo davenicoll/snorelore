@@ -90,15 +90,16 @@ class ClassifierService {
   /// room tone produces the mis-labels the user is seeing.
   static const double _primaryMinConfidence = 0.10;
 
-  /// How close a category's best score must be to the globally top-scoring
-  /// category before we allow priority to swap it in. At 0.5 almost anything
-  /// could override the raw top pick; at 0.75 we only reorder on near-ties.
-  static const double _priorityFloorRatio = 0.75;
-
   /// Per-segment confidence floor for colouring the waveform. A segment
   /// below this threshold is rendered in the neutral base colour rather
-  /// than tinted.
-  static const double _windowMinConfidence = 0.15;
+  /// than tinted. Applied to the raw (unpriored) aggregated score so
+  /// priors can't fabricate signal over the floor.
+  static const double _windowMinConfidence = 0.20;
+
+  /// Peak amplitude below which a segment is treated as silent regardless
+  /// of what YAMNet scored. Measured on the float32 [-1,1] samples as
+  /// peak-dBFS: anything below -50 dBFS is pretty much room tone.
+  static const double _silenceThresholdDb = -50;
 
   /// Length of one classification segment. The waveform is coloured in
   /// bands of this size — one dominant category per band.
@@ -122,27 +123,36 @@ class ClassifierService {
     return _classifySamples(samples);
   }
 
-  /// Classifies the clip in non-overlapping 10 s segments. Each segment
-  /// becomes one entry in the returned `windowCategories` list, which drives
-  /// the per-band colouring of the waveform. Within each segment we run
-  /// YAMNet multiple times at its native 0.975 s input size and take the
-  /// per-class max, so a 10 s band of mostly-silence with one strong snore
-  /// still scores high on Snoring. The per-clip primary and tags come from
-  /// the max across every inference in the clip — same behaviour as before.
+  /// Classifies the clip in non-overlapping 10 s segments.
+  ///
+  /// For each segment we run YAMNet multiple times at its native 0.975 s
+  /// input size, collapse each inference's 521-class probabilities into our
+  /// simplified categories (keeping the best child class per category),
+  /// then aggregate across inferences per category according to its
+  /// [CategoryAggregation]: MAX for transient events (sneeze, cough,
+  /// alarm), MEAN for sustained sounds (snoring, breathing, speech).
+  /// That means a single 0.9 frame of "Purr" embedded in nine frames of
+  /// 0.05 snoring no longer wins the segment — where the old max-only
+  /// aggregation let it.
+  ///
+  /// An amplitude gate short-circuits silent segments to `silence`
+  /// regardless of YAMNet, and the bedroom prior tips close ties towards
+  /// plausible-at-night categories. The clip-wide primary and tags are
+  /// computed by aggregating the per-segment per-category scores across
+  /// segments using the same MAX/MEAN rules.
   ClipClassification? _classifySamples(Float32List samples) {
     final interp = _interp;
     if (interp == null || samples.isEmpty) return null;
 
     final numSegments =
         math.max(1, (samples.length / _segmentSamples).ceil());
-    // Budget YAMNet inferences across segments so long clips don't explode.
-    // Each segment runs at least 1 inference; short clips run up to ~10
-    // (0.975 s stride inside a 10 s band), long clips thin down.
     final perSegBudget =
         math.max(1, _maxTotalInferences ~/ numSegments);
 
-    final maxScores = List<double>.filled(521, 0);
     final windowCategories = <SoundCategory>[];
+    // One map per segment: category → aggregated raw (unpriored) score.
+    // Used afterwards to compute the clip primary and tags.
+    final perSegmentAgg = <Map<SoundCategory, double>>[];
 
     // Reusable output buffers — TFLite needs the exact shape each call, but
     // we can let Dart reuse the lists.
@@ -156,11 +166,16 @@ class ClassifierService {
       final segEnd = math.min(segStart + _segmentSamples, samples.length);
       final segLen = segEnd - segStart;
 
-      // Accumulate per-class max within this segment across its inferences.
-      final segScores = List<double>.filled(521, 0);
+      // Amplitude gate. If the whole 10 s band is below the silence floor
+      // there's nothing for YAMNet to classify. Skip inference entirely.
+      final segAmpDb = _segmentPeakDb(samples, segStart, segEnd);
+      if (segAmpDb < _silenceThresholdDb) {
+        windowCategories.add(SoundCategory.silence);
+        perSegmentAgg.add(const <SoundCategory, double>{});
+        continue;
+      }
 
-      // Build inference offsets within the segment. For segments shorter
-      // than one YAMNet frame we zero-pad and run once.
+      // Inference offsets within the segment.
       final inferOffsets = <int>[];
       if (segLen <= _frame) {
         inferOffsets.add(0);
@@ -177,6 +192,9 @@ class ClassifierService {
         if (inferOffsets.isEmpty) inferOffsets.add(0);
       }
 
+      // Collect per-inference per-category scores (best raw-label score per
+      // category within each inference).
+      final perInference = <Map<SoundCategory, double>>[];
       for (final off in inferOffsets) {
         Float32List frame;
         if (segLen <= _frame) {
@@ -197,42 +215,36 @@ class ClassifierService {
           return null;
         }
         final row = scoresOut[0];
+        final perCat = <SoundCategory, double>{};
         for (var k = 0; k < 521; k++) {
           final s = row[k];
-          if (s > segScores[k]) segScores[k] = s;
+          if (s <= 0) continue;
+          final cat = k < _labelCategories.length
+              ? _labelCategories[k]
+              : SoundCategory.unknown;
+          if (cat == SoundCategory.unknown) continue;
+          final prev = perCat[cat];
+          if (prev == null || s > prev) perCat[cat] = s;
         }
+        perInference.add(perCat);
       }
 
-      // Roll segment max into the clip-wide max for the primary/tag pick.
-      for (var k = 0; k < 521; k++) {
-        if (segScores[k] > maxScores[k]) maxScores[k] = segScores[k];
-      }
+      // Aggregate per category across this segment's inferences, MAX for
+      // events and MEAN for sustained sounds.
+      final segAgg = _aggregatePerCategory(perInference);
+      perSegmentAgg.add(segAgg);
 
-      // Per-segment dominant category: collapse raw classes to our simplified
-      // set by taking each category's best-scoring class within this segment.
-      final perCat = <SoundCategory, double>{};
-      for (var k = 0; k < 521; k++) {
-        final score = segScores[k];
-        if (score <= 0) continue;
-        final cat = k < _labelCategories.length
-            ? _labelCategories[k]
-            : SoundCategory.unknown;
-        if (cat == SoundCategory.unknown) continue;
-        final prev = perCat[cat];
-        if (prev == null || score > prev) perCat[cat] = score;
-      }
-      // Apply the bedroom prior when picking the segment's dominant
-      // category: snoring/breathing get nudged up, traffic/weather down.
-      // The raw score still governs whether we commit at all (via
-      // `_windowMinConfidence`) so priors can't fabricate signal.
+      // Pick the segment's dominant category — priored argmax. Raw score
+      // must also pass the confidence floor, so priors can only break
+      // close ties, not fabricate signal.
       SoundCategory winCat = SoundCategory.unknown;
       double winRaw = 0;
       double winPriored = 0;
-      perCat.forEach((c, s) {
-        final priored = s * (categoryPrior[c] ?? 1.0);
+      segAgg.forEach((c, raw) {
+        final priored = raw * (categoryPrior[c] ?? 1.0);
         if (priored > winPriored) {
           winPriored = priored;
-          winRaw = s;
+          winRaw = raw;
           winCat = c;
         }
       });
@@ -242,115 +254,167 @@ class ClassifierService {
 
     if (windowCategories.isEmpty) return null;
     return _pickPrimaryAndTags(
-      maxScores,
+      perSegmentAgg,
       _smoothSegments(windowCategories),
     );
   }
 
-  /// Smooth an isolated outlier segment: if both neighbours agree on a
-  /// category that differs from the centre, override the centre. Catches
-  /// the single "Cat" band that shows up in five minutes of Snoring
-  /// without overwriting genuine transitions (which would need both
-  /// neighbours to also flip).
-  List<SoundCategory> _smoothSegments(List<SoundCategory> cats) {
-    if (cats.length < 3) return cats;
-    final out = List<SoundCategory>.of(cats);
-    for (var i = 1; i < cats.length - 1; i++) {
-      final prev = cats[i - 1];
-      final next = cats[i + 1];
-      if (prev == next && prev != cats[i]) {
-        out[i] = prev;
+  /// Aggregate the per-inference per-category score maps into one map of
+  /// (category → aggregated raw score). The aggregation mode is MAX or
+  /// MEAN per category, to match the temporal behaviour of the sound.
+  Map<SoundCategory, double> _aggregatePerCategory(
+      List<Map<SoundCategory, double>> perInference) {
+    if (perInference.isEmpty) return const {};
+    final allCats = <SoundCategory>{
+      for (final m in perInference) ...m.keys,
+    };
+    final out = <SoundCategory, double>{};
+    for (final cat in allCats) {
+      final mode = categoryAggregation[cat] ?? CategoryAggregation.max;
+      if (mode == CategoryAggregation.max) {
+        var peak = 0.0;
+        for (final m in perInference) {
+          final v = m[cat] ?? 0.0;
+          if (v > peak) peak = v;
+        }
+        if (peak > 0) out[cat] = peak;
+      } else {
+        var sum = 0.0;
+        for (final m in perInference) {
+          sum += m[cat] ?? 0.0;
+        }
+        final mean = sum / perInference.length;
+        if (mean > 0) out[cat] = mean;
       }
     }
     return out;
   }
 
-  ClipClassification? _pickPrimaryAndTags(
-      List<double> maxScores, List<SoundCategory> windowCategories) {
-    // Per-category aggregation: for each of our simplified categories, keep
-    // the best-scoring raw YAMNet label that maps to it.
-    final best = <SoundCategory, (int, double)>{};
-    for (var i = 0; i < maxScores.length; i++) {
-      final score = maxScores[i];
-      if (score <= 0) continue;
-      final label = i < _labels.length ? _labels[i] : 'Unknown';
-      final cat = mapYamnetLabel(label);
-      final prev = best[cat];
-      if (prev == null || score > prev.$2) {
-        best[cat] = (i, score);
+  /// Peak-dBFS of the float32 samples in [start, end). Used to short-circuit
+  /// silent segments before running any YAMNet inferences on them.
+  double _segmentPeakDb(Float32List samples, int start, int end) {
+    if (start >= samples.length) return -100;
+    final hi = math.min(end, samples.length);
+    var peak = 0.0;
+    for (var i = start; i < hi; i++) {
+      final a = samples[i].abs();
+      if (a > peak) peak = a;
+    }
+    if (peak <= 0) return -100;
+    return 20 * (math.log(peak) / math.ln10);
+  }
+
+  /// Mode-of-5 filter run in 2 passes. Each pass, for each segment, counts
+  /// categories across the centre and the 2 neighbours either side; if a
+  /// single category holds a strict majority (≥3) and the centre disagrees,
+  /// the centre is rewritten. Event categories (sneeze, cough, alarm…) are
+  /// never rewritten — even a single 10 s segment of them is informative.
+  /// Two passes handles the case of 2 adjacent outliers.
+  List<SoundCategory> _smoothSegments(List<SoundCategory> cats) {
+    if (cats.length < 3) return cats;
+    var current = List<SoundCategory>.of(cats);
+    for (var pass = 0; pass < 2; pass++) {
+      final snapshot = List<SoundCategory>.of(current);
+      for (var i = 0; i < snapshot.length; i++) {
+        if (eventCategories.contains(snapshot[i])) continue;
+        final lo = math.max(0, i - 2);
+        final hi = math.min(snapshot.length - 1, i + 2);
+        final counts = <SoundCategory, int>{};
+        for (var j = lo; j <= hi; j++) {
+          counts[snapshot[j]] = (counts[snapshot[j]] ?? 0) + 1;
+        }
+        SoundCategory mode = snapshot[i];
+        var modeCount = 0;
+        counts.forEach((c, n) {
+          if (n > modeCount) {
+            modeCount = n;
+            mode = c;
+          }
+        });
+        if (modeCount >= 3 && mode != snapshot[i]) {
+          current[i] = mode;
+        }
       }
     }
-    if (best.isEmpty) return null;
+    return current;
+  }
+
+  ClipClassification? _pickPrimaryAndTags(
+      List<Map<SoundCategory, double>> perSegmentAgg,
+      List<SoundCategory> windowCategories) {
+    // Clip-level per-category score: aggregate the per-segment scores
+    // across segments using the same MAX/MEAN rules. So snoring's clip
+    // score is the mean of its per-segment means (= overall snoring
+    // prevalence); sneeze's clip score is the max across segments.
+    final allCats = <SoundCategory>{
+      for (final m in perSegmentAgg) ...m.keys,
+    };
+    final clipAgg = <SoundCategory, double>{};
+    for (final cat in allCats) {
+      final mode = categoryAggregation[cat] ?? CategoryAggregation.max;
+      if (mode == CategoryAggregation.max) {
+        var peak = 0.0;
+        for (final m in perSegmentAgg) {
+          final v = m[cat] ?? 0.0;
+          if (v > peak) peak = v;
+        }
+        if (peak > 0) clipAgg[cat] = peak;
+      } else {
+        var sum = 0.0;
+        for (final m in perSegmentAgg) {
+          sum += m[cat] ?? 0.0;
+        }
+        final mean = sum / perSegmentAgg.length;
+        if (mean > 0) clipAgg[cat] = mean;
+      }
+    }
+
+    ClipClassification otherOnly() => ClipClassification(
+          primary: const ClassificationResult(
+            category: SoundCategory.unknown,
+            label: 'Other',
+            confidence: 0,
+          ),
+          tags: const [],
+          windowCategories: windowCategories,
+        );
+
+    if (clipAgg.isEmpty) return otherOnly();
+
+    // Raw (unpriored) top gates commitment — priors can shuffle close
+    // contenders but can't push a weak signal over the confidence floor.
+    final rawTop = clipAgg.values.reduce(math.max);
+    if (rawTop < _primaryMinConfidence) return otherOnly();
 
     double prioredScore(SoundCategory cat, double raw) =>
         raw * (categoryPrior[cat] ?? 1.0);
 
-    // Raw (unpriored) top — governs whether we're allowed to commit to
-    // any category at all. Priors can't push a weak signal over the
-    // commit threshold.
-    final rawTop = best.values.map((v) => v.$2).reduce(math.max);
-    if (rawTop < _primaryMinConfidence) {
-      return ClipClassification(
-        primary: const ClassificationResult(
-          category: SoundCategory.unknown,
-          label: 'Other',
-          confidence: 0,
-        ),
-        tags: const [],
-        windowCategories: windowCategories,
-      );
-    }
-
-    // Priored top — drives the primary pick and the near-top floor. So
-    // on a close Purr/Snoring race, the bedroom prior tips the scale to
-    // Snoring. Pure suppression of implausible nighttime categories.
-    final prioredTop = best.entries
-        .map((e) => prioredScore(e.key, e.value.$2))
-        .reduce(math.max);
-    final nearTopFloor = prioredTop * _priorityFloorRatio;
-
-    SoundCategory primaryCat = SoundCategory.unknown;
-    (int, double)? primaryHit;
-    for (final cat in categoryPriority) {
-      final hit = best[cat];
-      if (hit == null) continue;
-      if (prioredScore(cat, hit.$2) >= nearTopFloor) {
-        primaryCat = cat;
-        primaryHit = hit;
-        break;
-      }
-    }
-    if (primaryHit == null || primaryCat == SoundCategory.unknown) {
-      // Fall back: pick the entry with the highest priored score.
-      final topEntry = best.entries.reduce((a, b) =>
-          prioredScore(a.key, a.value.$2) >= prioredScore(b.key, b.value.$2)
-              ? a
-              : b);
-      primaryCat = topEntry.key;
-      primaryHit = topEntry.value;
-    }
+    // Priored argmax — bedroom priors do all the tie-breaking work. No
+    // separate priority walk: the prior is the mechanism.
+    final topEntry = clipAgg.entries.reduce((a, b) =>
+        prioredScore(a.key, a.value) >= prioredScore(b.key, b.value)
+            ? a
+            : b);
     final primary = ClassificationResult(
-      category: primaryCat,
-      label: primaryHit.$1 < _labels.length ? _labels[primaryHit.$1] : 'Unknown',
-      confidence: primaryHit.$2,
+      category: topEntry.key,
+      label: categoryInfo[topEntry.key]?.label ?? 'Other',
+      confidence: topEntry.value,
     );
 
-    // Tags: other categories that crossed the threshold anywhere in the
-    // clip. Sorted high to low, capped so we don't spam the UI. Skip the
-    // primary and skip `unknown` (no value as a tag).
+    // Tags: other categories whose raw aggregated score crossed the tag
+    // threshold. Sorted high to low, capped so we don't spam the UI.
     final tags = <ClassificationResult>[];
-    final entries = best.entries.toList()
-      ..sort((a, b) => b.value.$2.compareTo(a.value.$2));
+    final entries = clipAgg.entries.toList()
+      ..sort((a, b) => b.value.compareTo(a.value));
     for (final e in entries) {
-      if (e.key == primaryCat) continue;
+      if (e.key == topEntry.key) continue;
       if (e.key == SoundCategory.unknown) continue;
-      if (e.value.$2 < _tagThreshold) continue;
-      final label =
-          e.value.$1 < _labels.length ? _labels[e.value.$1] : 'Unknown';
+      if (e.key == SoundCategory.silence) continue;
+      if (e.value < _tagThreshold) continue;
       tags.add(ClassificationResult(
         category: e.key,
-        label: label,
-        confidence: e.value.$2,
+        label: categoryInfo[e.key]?.label ?? 'Other',
+        confidence: e.value,
       ));
       if (tags.length >= 4) break;
     }

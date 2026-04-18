@@ -27,6 +27,9 @@ enum SoundCategory {
   music,
   walking,
   movementBed,
+  // Audibly nothing there — assigned when the segment's peak amplitude is
+  // below the silence floor regardless of what YAMNet returns.
+  silence,
   // Deprecated buckets retained for backward compatibility with recordings
   // that were classified before the taxonomy split. New classifications
   // never produce these.
@@ -67,6 +70,7 @@ const Map<SoundCategory, CategoryInfo> categoryInfo = {
   SoundCategory.music: CategoryInfo('Music', Icons.music_note, AppColors.accent),
   SoundCategory.walking: CategoryInfo('Footsteps', Icons.directions_walk, AppColors.textMuted),
   SoundCategory.movementBed: CategoryInfo('Bedding', Icons.hotel, AppColors.textMuted),
+  SoundCategory.silence: CategoryInfo('Silence', Icons.volume_off, AppColors.textMuted),
   // Legacy — render sensibly for old records that haven't been re-analyzed.
   SoundCategory.animal: CategoryInfo('Pet', Icons.pets, AppColors.teal),
   SoundCategory.alarm: CategoryInfo('Alarm', Icons.notifications_active, AppColors.red),
@@ -349,40 +353,71 @@ const Map<SoundCategory, double> categoryPrior = {
   SoundCategory.animal: 1.0,
   SoundCategory.alarm: 1.0,
   SoundCategory.movement: 1.0,
+  SoundCategory.silence: 1.0,
   SoundCategory.unknown: 1.0,
 };
 
-/// When several categories score close together, prefer the ones that are
-/// most distinctive for a sleep journal. Sleep events rank above ambient
-/// background. The priority walk only fires when a category is within
-/// `_priorityFloorRatio` of the globally top-scoring category, so this
-/// list is a tie-breaker not an override.
-const List<SoundCategory> categoryPriority = [
-  SoundCategory.snoring,
-  SoundCategory.passion,
+/// How the classifier aggregates a category's score across the multiple
+/// YAMNet inferences in one segment (and across the segments of a clip).
+///
+/// MAX: a single strong hit commits the category. Right for short, rare
+///   events — sneeze, cough, fart, alarm, siren, doorbell — where one
+///   frame of high confidence is all the evidence you get.
+/// MEAN: averaged across frames. Right for sustained sounds — snoring,
+///   breathing, speech, traffic — where a single noisy 0.9 frame shouldn't
+///   tag the whole segment if the other 9 frames are 0.05.
+enum CategoryAggregation { max, mean }
+
+const Map<SoundCategory, CategoryAggregation> categoryAggregation = {
+  // Events / transients
+  SoundCategory.sneeze: CategoryAggregation.max,
+  SoundCategory.cough: CategoryAggregation.max,
+  SoundCategory.fart: CategoryAggregation.max,
+  SoundCategory.scream: CategoryAggregation.max,
+  SoundCategory.laugh: CategoryAggregation.max,
+  SoundCategory.cry: CategoryAggregation.max,
+  SoundCategory.passion: CategoryAggregation.max,
+  SoundCategory.alarmClock: CategoryAggregation.max,
+  SoundCategory.alarmHousehold: CategoryAggregation.max,
+  SoundCategory.siren: CategoryAggregation.max,
+  SoundCategory.phone: CategoryAggregation.max,
+  SoundCategory.doorbell: CategoryAggregation.max,
+  SoundCategory.cat: CategoryAggregation.max,
+  SoundCategory.dog: CategoryAggregation.max,
+  SoundCategory.walking: CategoryAggregation.max,
+  // Sustained
+  SoundCategory.snoring: CategoryAggregation.mean,
+  SoundCategory.breathing: CategoryAggregation.mean,
+  SoundCategory.speech: CategoryAggregation.mean,
+  SoundCategory.whisper: CategoryAggregation.mean,
+  SoundCategory.traffic: CategoryAggregation.mean,
+  SoundCategory.weather: CategoryAggregation.mean,
+  SoundCategory.music: CategoryAggregation.mean,
+  SoundCategory.movementBed: CategoryAggregation.mean,
+  // Legacy / meta
+  SoundCategory.animal: CategoryAggregation.max,
+  SoundCategory.alarm: CategoryAggregation.max,
+  SoundCategory.movement: CategoryAggregation.mean,
+  SoundCategory.silence: CategoryAggregation.mean,
+  SoundCategory.unknown: CategoryAggregation.max,
+};
+
+/// Categories that represent short, acute events. The waveform smoother
+/// never smooths one of these away: even a single 10 s segment of "Sneeze"
+/// is informative and almost certainly genuine. Smoothing targets the
+/// steady-state categories, where a lone outlier segment in the middle of
+/// a long run is the common YAMNet mis-label.
+const Set<SoundCategory> eventCategories = {
   SoundCategory.sneeze,
   SoundCategory.cough,
   SoundCategory.fart,
-  SoundCategory.cry,
-  SoundCategory.laugh,
   SoundCategory.scream,
-  SoundCategory.whisper,
-  SoundCategory.speech,
+  SoundCategory.laugh,
+  SoundCategory.cry,
+  SoundCategory.passion,
+  SoundCategory.alarmClock,
   SoundCategory.alarmHousehold,
   SoundCategory.siren,
-  SoundCategory.alarmClock,
   SoundCategory.phone,
   SoundCategory.doorbell,
-  SoundCategory.cat,
-  SoundCategory.dog,
-  SoundCategory.breathing,
-  SoundCategory.walking,
-  SoundCategory.movementBed,
-  SoundCategory.music,
-  SoundCategory.traffic,
-  SoundCategory.weather,
-  SoundCategory.animal,
-  SoundCategory.alarm,
-  SoundCategory.movement,
-  SoundCategory.unknown,
-];
+};

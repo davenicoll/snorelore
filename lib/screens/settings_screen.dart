@@ -32,11 +32,13 @@ class _SettingsScreenState extends State<SettingsScreen> {
     final s = await svc.settings.load();
     final b = await FgsBridge.isIgnoringBatteryOptimizations();
     final info = await PackageInfo.fromPlatform();
-    if (mounted) setState(() {
-      _settings = s;
-      _batteryExempt = b;
-      _versionLabel = 'SnoreLore · v${info.version}';
-    });
+    if (mounted) {
+      setState(() {
+        _settings = s;
+        _batteryExempt = b;
+        _versionLabel = 'SnoreLore · v${info.version}';
+      });
+    }
   }
 
   Future<void> _save(AppSettings s) async {
@@ -101,9 +103,11 @@ class _SettingsScreenState extends State<SettingsScreen> {
 
   Future<void> _reanalyzeAll() async {
     final svc = AppServices.of(context);
+    final messenger = ScaffoldMessenger.of(context);
     final all = await svc.storage.loadAll();
+    if (!mounted) return;
     if (all.isEmpty) {
-      ScaffoldMessenger.of(context).showSnackBar(
+      messenger.showSnackBar(
         const SnackBar(content: Text('No recordings to re-analyze')),
       );
       return;
@@ -121,7 +125,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
         title: const Text('Re-analyzing'),
         content: ValueListenableBuilder<int>(
           valueListenable: progress,
-          builder: (_, v, __) => Column(
+          builder: (_, v, _) => Column(
             mainAxisSize: MainAxisSize.min,
             crossAxisAlignment: CrossAxisAlignment.stretch,
             children: [
@@ -171,17 +175,15 @@ class _SettingsScreenState extends State<SettingsScreen> {
     }
 
     if (mounted && !cancelled) Navigator.of(context).pop();
-    if (mounted) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          content: Text(
-            cancelled
-                ? 'Re-analysis stopped at ${progress.value} / $total'
-                : 'Re-analyzed $total recordings',
-          ),
+    messenger.showSnackBar(
+      SnackBar(
+        content: Text(
+          cancelled
+              ? 'Re-analysis stopped at ${progress.value} / $total'
+              : 'Re-analyzed $total recordings',
         ),
-      );
-    }
+      ),
+    );
   }
 
   Future<void> _clearClassifications() async {

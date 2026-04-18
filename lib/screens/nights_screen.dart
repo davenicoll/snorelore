@@ -41,10 +41,12 @@ class _NightsScreenState extends State<NightsScreen> {
 
   Future<void> _load() async {
     final all = await AppServices.of(context).storage.loadAll();
-    if (mounted) setState(() {
-      _all = all;
-      _loading = false;
-    });
+    if (mounted) {
+      setState(() {
+        _all = all;
+        _loading = false;
+      });
+    }
   }
 
   @override
@@ -66,7 +68,7 @@ class _NightsScreenState extends State<NightsScreen> {
       child: ListView.separated(
         padding: const EdgeInsets.fromLTRB(16, 8, 16, 24),
         itemCount: keys.length,
-        separatorBuilder: (_, __) => const SizedBox(height: 12),
+        separatorBuilder: (_, _) => const SizedBox(height: 12),
         itemBuilder: (_, i) {
           final night = keys[i];
           final recs = grouped[night]!;

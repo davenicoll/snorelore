@@ -141,9 +141,10 @@ class _RecordingTileState extends State<RecordingTile> {
   List<Color?>? _segmentColors(Recording r) {
     if (r.windowCategories.isEmpty) return null;
     return r.windowCategories
-        .map<Color?>((c) => c == SoundCategory.unknown
-            ? null
-            : categoryInfo[c]?.color)
+        .map<Color?>((c) =>
+            (c == SoundCategory.unknown || c == SoundCategory.silence)
+                ? null
+                : categoryInfo[c]?.color)
         .toList();
   }
 
