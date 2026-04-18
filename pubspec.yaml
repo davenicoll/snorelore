@@ -2,7 +2,7 @@ name: snorelore
 description: "Record sleep noises overnight — snores, coughs, and sleep-talking. Classify, replay, share."
 publish_to: 'none'
 
-version: 0.7.2+9
+version: 0.7.3+10
 
 environment:
   sdk: ^3.10.4
@@ -35,8 +35,12 @@ flutter_launcher_icons:
   android: true
   ios: true
   image_path: "assets/snorelore.png"
-  adaptive_icon_foreground: "assets/snorelore.png"
+  # Adaptive foreground is padded to keep the logo in the inner ~66% safe
+  # zone; without this the launcher's circular mask crops the edges and the
+  # icon looks shrunken inside a big white circle on Android 8+.
+  adaptive_icon_foreground: "assets/snorelore_foreground.png"
   adaptive_icon_background: "#0B1026"
+  min_sdk_android: 21
 
 flutter:
   uses-material-design: true
