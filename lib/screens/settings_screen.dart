@@ -1,5 +1,12 @@
+import 'dart:io';
+
+import 'package:archive/archive_io.dart';
 import 'package:flutter/material.dart';
+import 'package:intl/intl.dart';
 import 'package:package_info_plus/package_info_plus.dart';
+import 'package:path/path.dart' as p;
+import 'package:path_provider/path_provider.dart';
+import 'package:share_plus/share_plus.dart';
 
 import '../app_services.dart';
 import '../models/app_settings.dart';
@@ -241,6 +248,142 @@ class _SettingsScreenState extends State<SettingsScreen> {
     );
   }
 
+  /// Pack every recording plus the JSON index into a single ZIP in the
+  /// app's cache dir, then hand it to the system share sheet so the user
+  /// can route it to any destination — Files → save to folder, Drive,
+  /// email, etc. Streams to disk so big libraries don't blow up memory.
+  Future<void> _exportRecordingsZip() async {
+    final svc = AppServices.of(context);
+    final messenger = ScaffoldMessenger.of(context);
+    final navigator = Navigator.of(context);
+
+    final all = await svc.storage.loadAll();
+    if (!mounted) return;
+    if (all.isEmpty) {
+      messenger.showSnackBar(
+        const SnackBar(content: Text('No recordings to export')),
+      );
+      return;
+    }
+
+    final progress = ValueNotifier<int>(0);
+    final total = all.length;
+    var cancelled = false;
+
+    showDialog<void>(
+      context: context,
+      barrierDismissible: false,
+      builder: (_) => AlertDialog(
+        backgroundColor: AppColors.surface,
+        title: const Text('Exporting'),
+        content: ValueListenableBuilder<int>(
+          valueListenable: progress,
+          builder: (_, v, _) => Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              Text(
+                '$v / $total',
+                style: const TextStyle(color: AppColors.textMuted),
+              ),
+              const SizedBox(height: 12),
+              LinearProgressIndicator(
+                value: total == 0 ? 0 : v / total,
+                backgroundColor: AppColors.surfaceAlt,
+                valueColor:
+                    const AlwaysStoppedAnimation<Color>(AppColors.primary),
+              ),
+            ],
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () {
+              cancelled = true;
+              Navigator.of(context).pop();
+            },
+            child: const Text('Stop'),
+          ),
+        ],
+      ),
+    );
+
+    final tempDir = await getTemporaryDirectory();
+    final stamp = DateFormat('yyyyMMdd-HHmmss').format(DateTime.now());
+    final zipPath = p.join(tempDir.path, 'snorelore-export-$stamp.zip');
+    final zipFile = File(zipPath);
+    if (await zipFile.exists()) {
+      try {
+        await zipFile.delete();
+      } catch (_) {}
+    }
+
+    final encoder = ZipFileEncoder();
+    encoder.create(zipPath);
+
+    var added = 0;
+    try {
+      for (var i = 0; i < all.length; i++) {
+        if (cancelled) break;
+        final r = all[i];
+        final wav = File(r.filePath);
+        if (await wav.exists()) {
+          try {
+            await encoder.addFile(wav, 'recordings/${p.basename(r.filePath)}');
+            added++;
+          } catch (_) {}
+        }
+        progress.value = i + 1;
+      }
+      // Include the JSON index so a restore could rebuild everything.
+      final indexFile = await svc.storage.indexFile();
+      if (await indexFile.exists()) {
+        try {
+          await encoder.addFile(indexFile, 'index.json');
+        } catch (_) {}
+      }
+    } finally {
+      await encoder.close();
+    }
+
+    if (mounted && !cancelled) navigator.pop();
+
+    if (cancelled) {
+      try {
+        await zipFile.delete();
+      } catch (_) {}
+      if (!mounted) return;
+      messenger.showSnackBar(
+        SnackBar(
+            content:
+                Text('Export cancelled at ${progress.value} / $total')),
+      );
+      return;
+    }
+
+    final sizeBytes = await zipFile.length();
+    final sizeMb = (sizeBytes / (1024 * 1024)).toStringAsFixed(1);
+
+    if (!mounted) return;
+    messenger.showSnackBar(
+      SnackBar(content: Text('Archive ready — $added clips, $sizeMb MB')),
+    );
+
+    try {
+      await Share.shareXFiles(
+        [XFile(zipPath, mimeType: 'application/zip')],
+        subject: 'SnoreLore recordings — $stamp',
+        text: '$added clips, $sizeMb MB',
+      );
+    } catch (e) {
+      if (mounted) {
+        messenger.showSnackBar(
+          SnackBar(content: Text('Could not share: $e')),
+        );
+      }
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
     final s = _settings;
@@ -428,6 +571,21 @@ class _SettingsScreenState extends State<SettingsScreen> {
                   trailing: const Icon(Icons.chevron_right,
                       color: AppColors.textMuted),
                   onTap: _clearClassifications,
+                ),
+                const Divider(height: 1),
+                ListTile(
+                  leading: const Icon(Icons.archive_outlined,
+                      color: AppColors.accent),
+                  title: const Text('Export recordings as ZIP'),
+                  subtitle: const Text(
+                    'Bundle every clip and the index, then save to a folder '
+                    'of your choice',
+                    style:
+                        TextStyle(color: AppColors.textMuted, fontSize: 12),
+                  ),
+                  trailing: const Icon(Icons.chevron_right,
+                      color: AppColors.textMuted),
+                  onTap: _exportRecordingsZip,
                 ),
               ],
             ),
