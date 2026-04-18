@@ -209,7 +209,7 @@ class _TonightScreenState extends State<TonightScreen>
           children: [
             AnimatedBuilder(
               animation: _pulse,
-              builder: (_, __) => Container(
+              builder: (_, _) => Container(
                 width: 60,
                 height: 60,
                 decoration: BoxDecoration(
@@ -246,7 +246,7 @@ class _TonightScreenState extends State<TonightScreen>
       onTap: _toggle,
       child: AnimatedBuilder(
         animation: _pulse,
-        builder: (_, __) {
+        builder: (_, _) {
           final scale = running ? 1 + 0.04 * _pulse.value : 1.0;
           return Transform.scale(
             scale: scale,
