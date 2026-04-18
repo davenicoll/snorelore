@@ -23,12 +23,19 @@ class NightDetailScreen extends StatefulWidget {
 
 class _NightDetailScreenState extends State<NightDetailScreen> {
   late List<Recording> _recordings;
+  bool _developerMode = false;
 
   @override
   void initState() {
     super.initState();
     _recordings = List.of(widget.recordings)
       ..sort((a, b) => a.startedAt.compareTo(b.startedAt));
+    WidgetsBinding.instance.addPostFrameCallback((_) => _loadDevMode());
+  }
+
+  Future<void> _loadDevMode() async {
+    final s = await AppServices.of(context).settings.load();
+    if (mounted) setState(() => _developerMode = s.developerMode);
   }
 
   Future<void> _refresh() async {
@@ -54,6 +61,41 @@ class _NightDetailScreenState extends State<NightDetailScreen> {
   Future<void> _deleteRecording(Recording r) async {
     await AppServices.of(context).storage.delete(r);
     await _refresh();
+  }
+
+  Future<void> _reanalyzeRecording(Recording r) async {
+    final svc = AppServices.of(context);
+    final messenger = ScaffoldMessenger.of(context);
+    messenger.showSnackBar(
+      const SnackBar(
+        content: Text('Re-analyzing…'),
+        duration: Duration(seconds: 1),
+      ),
+    );
+    try {
+      final result = await svc.classifier.classifyWavFile(r.filePath);
+      if (result == null) {
+        messenger.showSnackBar(
+          const SnackBar(content: Text('Could not classify clip')),
+        );
+        return;
+      }
+      final updated = r.copyWith(
+        category: result.primary.category,
+        categoryLabel: result.primary.label,
+        categoryConfidence: result.primary.confidence,
+        tags: result.tags.map((t) => t.category).toList(),
+      );
+      await svc.storage.update(updated);
+      await _refresh();
+      messenger.showSnackBar(
+        SnackBar(content: Text('Reclassified as ${result.primary.label}')),
+      );
+    } catch (e) {
+      messenger.showSnackBar(
+        SnackBar(content: Text('Reanalyze failed: $e')),
+      );
+    }
   }
 
   Future<void> _deleteAll() async {
@@ -99,25 +141,30 @@ class _NightDetailScreenState extends State<NightDetailScreen> {
           ),
         ],
       ),
-      body: _recordings.isEmpty
-          ? const Center(
-              child: Text('No clips for this night',
-                  style: TextStyle(color: AppColors.textMuted)),
-            )
-          : ListView.separated(
-              padding: const EdgeInsets.fromLTRB(16, 8, 16, 24),
-              itemCount: _recordings.length,
-              separatorBuilder: (_, __) => const SizedBox(height: 10),
-              itemBuilder: (_, i) {
-                final r = _recordings[i];
-                return RecordingTile(
-                  key: ValueKey(r.id),
-                  recording: r,
-                  onDelete: () => _deleteRecording(r),
-                  onShare: () => _shareRecording(r),
-                );
-              },
-            ),
+      body: SafeArea(
+        top: false,
+        child: _recordings.isEmpty
+            ? const Center(
+                child: Text('No clips for this night',
+                    style: TextStyle(color: AppColors.textMuted)),
+              )
+            : ListView.separated(
+                padding: const EdgeInsets.fromLTRB(16, 8, 16, 24),
+                itemCount: _recordings.length,
+                separatorBuilder: (_, __) => const SizedBox(height: 10),
+                itemBuilder: (_, i) {
+                  final r = _recordings[i];
+                  return RecordingTile(
+                    key: ValueKey(r.id),
+                    recording: r,
+                    onDelete: () => _deleteRecording(r),
+                    onShare: () => _shareRecording(r),
+                    showReanalyze: _developerMode,
+                    onReanalyze: () => _reanalyzeRecording(r),
+                  );
+                },
+              ),
+      ),
     );
   }
 }

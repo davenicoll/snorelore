@@ -27,6 +27,26 @@ class Recording {
     required this.waveform,
   });
 
+  Recording copyWith({
+    SoundCategory? category,
+    String? categoryLabel,
+    double? categoryConfidence,
+    List<SoundCategory>? tags,
+  }) =>
+      Recording(
+        id: id,
+        filePath: filePath,
+        startedAt: startedAt,
+        durationMs: durationMs,
+        peakDb: peakDb,
+        avgDb: avgDb,
+        category: category ?? this.category,
+        categoryLabel: categoryLabel ?? this.categoryLabel,
+        categoryConfidence: categoryConfidence ?? this.categoryConfidence,
+        tags: tags ?? this.tags,
+        waveform: waveform,
+      );
+
   /// The "night" key for grouping. Sounds between noon and midnight are
   /// assigned to that day; sounds after midnight until noon go back to the
   /// previous day. That way one sleep session is a single night.

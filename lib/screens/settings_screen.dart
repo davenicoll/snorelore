@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:package_info_plus/package_info_plus.dart';
 
 import '../app_services.dart';
 import '../models/app_settings.dart';
@@ -15,6 +16,9 @@ class SettingsScreen extends StatefulWidget {
 class _SettingsScreenState extends State<SettingsScreen> {
   AppSettings? _settings;
   bool _batteryExempt = false;
+  String _versionLabel = '';
+  int _versionTaps = 0;
+  DateTime? _lastVersionTap;
 
   @override
   void initState() {
@@ -26,9 +30,11 @@ class _SettingsScreenState extends State<SettingsScreen> {
     final svc = AppServices.of(context);
     final s = await svc.settings.load();
     final b = await FgsBridge.isIgnoringBatteryOptimizations();
+    final info = await PackageInfo.fromPlatform();
     if (mounted) setState(() {
       _settings = s;
       _batteryExempt = b;
+      _versionLabel = 'SnoreLore · v${info.version}';
     });
   }
 
@@ -38,6 +44,33 @@ class _SettingsScreenState extends State<SettingsScreen> {
     await svc.settings.save(s);
     // Apply immediately so changes take effect mid-session.
     svc.recorder.updateSettings(s);
+  }
+
+  void _onVersionTap() {
+    final now = DateTime.now();
+    if (_lastVersionTap != null &&
+        now.difference(_lastVersionTap!) > const Duration(seconds: 2)) {
+      _versionTaps = 0;
+    }
+    _lastVersionTap = now;
+    _versionTaps++;
+
+    final s = _settings;
+    if (s == null) return;
+
+    if (!s.developerMode && _versionTaps >= 10) {
+      _versionTaps = 0;
+      _save(s.copyWith(developerMode: true));
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Developer mode enabled')),
+      );
+    } else if (s.developerMode && _versionTaps >= 10) {
+      _versionTaps = 0;
+      _save(s.copyWith(developerMode: false));
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Developer mode disabled')),
+      );
+    }
   }
 
   Future<TimeOfDay?> _pickTime(TimeOfDay initial) {
@@ -63,6 +96,90 @@ class _SettingsScreenState extends State<SettingsScreen> {
     final m = t.minute.toString().padLeft(2, '0');
     final p = t.period == DayPeriod.am ? 'AM' : 'PM';
     return '$h:$m $p';
+  }
+
+  Future<void> _reanalyzeAll() async {
+    final svc = AppServices.of(context);
+    final all = await svc.storage.loadAll();
+    if (all.isEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('No recordings to re-analyze')),
+      );
+      return;
+    }
+
+    final progress = ValueNotifier<int>(0);
+    final total = all.length;
+    bool cancelled = false;
+
+    showDialog<void>(
+      context: context,
+      barrierDismissible: false,
+      builder: (_) => AlertDialog(
+        backgroundColor: AppColors.surface,
+        title: const Text('Re-analyzing'),
+        content: ValueListenableBuilder<int>(
+          valueListenable: progress,
+          builder: (_, v, __) => Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              Text(
+                '$v / $total',
+                style: const TextStyle(color: AppColors.textMuted),
+              ),
+              const SizedBox(height: 12),
+              LinearProgressIndicator(
+                value: total == 0 ? 0 : v / total,
+                backgroundColor: AppColors.surfaceAlt,
+                valueColor:
+                    const AlwaysStoppedAnimation<Color>(AppColors.primary),
+              ),
+            ],
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () {
+              cancelled = true;
+              Navigator.of(context).pop();
+            },
+            child: const Text('Stop'),
+          ),
+        ],
+      ),
+    );
+
+    for (var i = 0; i < all.length; i++) {
+      if (cancelled) break;
+      final r = all[i];
+      try {
+        final result = await svc.classifier.classifyWavFile(r.filePath);
+        if (result != null) {
+          final updated = r.copyWith(
+            category: result.primary.category,
+            categoryLabel: result.primary.label,
+            categoryConfidence: result.primary.confidence,
+            tags: result.tags.map((t) => t.category).toList(),
+          );
+          await svc.storage.update(updated);
+        }
+      } catch (_) {}
+      progress.value = i + 1;
+    }
+
+    if (mounted && !cancelled) Navigator.of(context).pop();
+    if (mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(
+            cancelled
+                ? 'Re-analysis stopped at ${progress.value} / $total'
+                : 'Re-analyzed $total recordings',
+          ),
+        ),
+      );
+    }
   }
 
   @override
@@ -221,13 +338,43 @@ class _SettingsScreenState extends State<SettingsScreen> {
             ],
           ),
         ),
+        if (s.developerMode) ...[
+          const SizedBox(height: 20),
+          _sectionTitle('Developer'),
+          Card(
+            child: Column(
+              children: [
+                ListTile(
+                  leading: const Icon(Icons.refresh, color: AppColors.primary),
+                  title: const Text('Re-analyze all recordings'),
+                  subtitle: const Text(
+                    'Re-run classification on every saved clip',
+                    style:
+                        TextStyle(color: AppColors.textMuted, fontSize: 12),
+                  ),
+                  trailing: const Icon(Icons.chevron_right,
+                      color: AppColors.textMuted),
+                  onTap: _reanalyzeAll,
+                ),
+              ],
+            ),
+          ),
+        ],
         const SizedBox(height: 28),
         Center(
-          child: Text(
-            'SnoreLore · v0.2',
-            style: TextStyle(
-              color: AppColors.textMuted.withValues(alpha: 0.7),
-              fontSize: 12,
+          child: GestureDetector(
+            behavior: HitTestBehavior.opaque,
+            onTap: _onVersionTap,
+            child: Padding(
+              padding: const EdgeInsets.symmetric(
+                  horizontal: 24, vertical: 8),
+              child: Text(
+                _versionLabel.isEmpty ? 'SnoreLore' : _versionLabel,
+                style: TextStyle(
+                  color: AppColors.textMuted.withValues(alpha: 0.7),
+                  fontSize: 12,
+                ),
+              ),
             ),
           ),
         ),
