@@ -27,13 +27,20 @@ class RecordingService : Service() {
     companion object {
         const val ACTION_START = "com.davenicoll.snorelore.START"
         const val ACTION_STOP = "com.davenicoll.snorelore.STOP"
+        const val ACTION_UPDATE = "com.davenicoll.snorelore.UPDATE"
+        const val EXTRA_TITLE = "title"
+        const val EXTRA_CONTENT = "content"
         private const val CHANNEL_ID = "snorelore_recording"
         private const val CHANNEL_NAME = "SnoreLore recording"
         private const val NOTIFICATION_ID = 1001
         private const val WAKE_LOCK_TAG = "snorelore:recording"
+        private const val DEFAULT_TITLE = "SnoreLore is listening"
+        private const val DEFAULT_CONTENT = "Keeps recording until you tap stop"
     }
 
     private var wakeLock: PowerManager.WakeLock? = null
+    private var currentTitle: String = DEFAULT_TITLE
+    private var currentContent: String = DEFAULT_CONTENT
 
     override fun onBind(intent: Intent?): IBinder? = null
 
@@ -44,6 +51,17 @@ class RecordingService : Service() {
                 stopForeground(STOP_FOREGROUND_REMOVE)
                 stopSelf()
                 return START_NOT_STICKY
+            }
+            ACTION_UPDATE -> {
+                intent.getStringExtra(EXTRA_TITLE)?.let { currentTitle = it }
+                intent.getStringExtra(EXTRA_CONTENT)?.let { currentContent = it }
+                // Only push the update if the service is already running —
+                // UPDATE should never be what first promotes us to foreground.
+                if (wakeLock?.isHeld == true) {
+                    val manager = getSystemService(NotificationManager::class.java)
+                    manager?.notify(NOTIFICATION_ID, buildNotification())
+                }
+                return START_STICKY
             }
             else -> {
                 ensureChannel()
@@ -119,10 +137,11 @@ class RecordingService : Service() {
             Notification.Builder(this)
         }
         builder
-            .setContentTitle("SnoreLore is listening")
-            .setContentText("Keeps recording until you tap stop")
+            .setContentTitle(currentTitle)
+            .setContentText(currentContent)
             .setSmallIcon(android.R.drawable.ic_btn_speak_now)
             .setOngoing(true)
+            .setOnlyAlertOnce(true)
         if (pi != null) builder.setContentIntent(pi)
         return builder.build()
     }
