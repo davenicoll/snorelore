@@ -31,6 +31,20 @@ class MainActivity : FlutterActivity() {
                         startService(intent)
                         result.success(null)
                     }
+                    "update" -> {
+                        val intent = Intent(this, RecordingService::class.java)
+                        intent.action = RecordingService.ACTION_UPDATE
+                        intent.putExtra(
+                            RecordingService.EXTRA_TITLE,
+                            call.argument<String>("title")
+                        )
+                        intent.putExtra(
+                            RecordingService.EXTRA_CONTENT,
+                            call.argument<String>("content")
+                        )
+                        startService(intent)
+                        result.success(null)
+                    }
                     "isIgnoringBatteryOptimizations" -> {
                         result.success(isIgnoringBatteryOptimizations())
                     }

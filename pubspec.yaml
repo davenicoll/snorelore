@@ -2,7 +2,7 @@ name: snorelore
 description: "Record sleep noises overnight — snores, coughs, and sleep-talking. Classify, replay, share."
 publish_to: 'none'
 
-version: 0.7.1+8
+version: 0.7.2+9
 
 environment:
   sdk: ^3.10.4

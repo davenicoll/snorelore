@@ -479,8 +479,57 @@ class AudioRecorderService {
     return out;
   }
 
+  String _lastNotifTitle = '';
+  String _lastNotifContent = '';
+
   void _emit() {
     _statusCtrl.add(_status);
+    _pushNotificationState();
+  }
+
+  /// Mirror the current session state into the foreground-service
+  /// notification so the user can see what's happening without opening the
+  /// app. We only forward to the platform channel when the text actually
+  /// changes, so the common listening tick doesn't hit the service every
+  /// second.
+  void _pushNotificationState() {
+    if (!_running) return;
+    final count = _segmentsCaptured;
+    final clipWord = count == 1 ? 'clip' : 'clips';
+    String title;
+    String content;
+    switch (_status.phase) {
+      case RecorderPhase.capturing:
+        final held = _captureStartedAt == null
+            ? Duration.zero
+            : DateTime.now().difference(_captureStartedAt!);
+        final mm = held.inMinutes.toString().padLeft(2, '0');
+        final ss = (held.inSeconds % 60).toString().padLeft(2, '0');
+        title = 'SnoreLore · Recording $mm:$ss';
+        content = '$count $clipWord captured tonight';
+        break;
+      case RecorderPhase.listening:
+        if (_status.ignoreWindow && _status.remainingIgnore != null) {
+          final mins = _status.remainingIgnore!.inMinutes;
+          final secs = _status.remainingIgnore!.inSeconds % 60;
+          title = 'SnoreLore · Waiting to start';
+          content = mins > 0
+              ? 'Ignoring for ${mins}m ${secs}s more'
+              : 'Ignoring for ${secs}s more';
+        } else {
+          title = 'SnoreLore · Listening';
+          content = count == 0
+              ? 'Waiting for sound'
+              : '$count $clipWord captured tonight';
+        }
+        break;
+      case RecorderPhase.idle:
+        return;
+    }
+    if (title == _lastNotifTitle && content == _lastNotifContent) return;
+    _lastNotifTitle = title;
+    _lastNotifContent = content;
+    unawaited(FgsBridge.update(title: title, content: content));
   }
 
   void dispose() {

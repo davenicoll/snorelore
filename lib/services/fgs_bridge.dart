@@ -21,6 +21,16 @@ class FgsBridge {
     } catch (_) {}
   }
 
+  static Future<void> update({required String title, required String content}) async {
+    if (!Platform.isAndroid) return;
+    try {
+      await _channel.invokeMethod('update', {
+        'title': title,
+        'content': content,
+      });
+    } catch (_) {}
+  }
+
   static Future<bool> isIgnoringBatteryOptimizations() async {
     if (!Platform.isAndroid) return true;
     try {
