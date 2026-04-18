@@ -15,7 +15,23 @@ import 'waveform_painter.dart';
 /// real playback position.
 class CategoryRecordingTile extends StatefulWidget {
   final Recording recording;
+
+  /// Which display bucket this tile is rendered under. Drives the play
+  /// button colour. When [multiColor] is false, also drives the waveform
+  /// tint (only segments folding into this bucket are coloured).
   final DisplayCategory highlight;
+
+  /// Unique session id for this tile instance. Because the same recording
+  /// can appear under multiple category sections, two tiles may share a
+  /// recording id — we need a per-instance identifier so that only the
+  /// tapped one lights up as active.
+  final String sessionId;
+
+  /// When true, every segment is tinted with its own category's colour
+  /// (used in Timeline view). When false, only segments matching
+  /// [highlight] are tinted (used under a category heading).
+  final bool multiColor;
+
   final VoidCallback? onShare;
   final VoidCallback? onDelete;
   final VoidCallback? onReanalyze;
@@ -25,6 +41,8 @@ class CategoryRecordingTile extends StatefulWidget {
     super.key,
     required this.recording,
     required this.highlight,
+    required this.sessionId,
+    this.multiColor = false,
     this.onShare,
     this.onDelete,
     this.onReanalyze,
@@ -66,7 +84,7 @@ class _CategoryRecordingTileState extends State<CategoryRecordingTile> {
     super.dispose();
   }
 
-  bool get _isActive => _state.activeClipId == widget.recording.id;
+  bool get _isActive => _state.activeSession == widget.sessionId;
   bool get _playing => _isActive && _state.playing;
 
   int get _totalMs => _isActive && _state.duration.inMilliseconds > 0
@@ -82,12 +100,12 @@ class _CategoryRecordingTileState extends State<CategoryRecordingTile> {
 
   Future<void> _togglePlay() async {
     final svc = AppServices.of(context).playback;
-    await svc.toggle(widget.recording.id, widget.recording.filePath);
+    await svc.toggle(widget.sessionId, widget.recording.filePath);
   }
 
   Future<void> _seekToFraction(double fraction) async {
     final svc = AppServices.of(context).playback;
-    await svc.ensureLoaded(widget.recording.id, widget.recording.filePath);
+    await svc.ensureLoaded(widget.sessionId, widget.recording.filePath);
     final totalMs = svc.state.duration.inMilliseconds > 0
         ? svc.state.duration.inMilliseconds
         : widget.recording.durationMs;
@@ -96,11 +114,24 @@ class _CategoryRecordingTileState extends State<CategoryRecordingTile> {
     );
   }
 
-  /// Per-bar colour list for the waveform. Only windows whose category
-  /// folds into [highlight] get tinted with that bucket's colour; every
-  /// other window (different bucket, unknown, silence) renders in the
-  /// base waveform colour.
+  /// Per-bar colour list for the waveform.
+  ///
+  /// - In single-bucket mode (category sections), only windows folding
+  ///   into [widget.highlight] are coloured.
+  /// - In multi-colour mode (timeline), every window is coloured by its
+  ///   own display bucket so a clip with both Snoring and Talking shows
+  ///   both colours inline.
+  ///
+  /// Silent / unknown windows always render with the base colour.
   List<Color?> _segmentColors() {
+    if (widget.multiColor) {
+      return widget.recording.windowCategories.map<Color?>((c) {
+        if (c == SoundCategory.unknown || c == SoundCategory.silence) {
+          return null;
+        }
+        return displayCategoryInfo[displayCategoryOf(c)]?.color;
+      }).toList();
+    }
     final info = displayCategoryInfo[widget.highlight]!;
     return widget.recording.windowCategories.map<Color?>((c) {
       if (c == SoundCategory.unknown || c == SoundCategory.silence) {
