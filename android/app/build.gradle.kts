@@ -39,7 +39,7 @@ android {
         val variant = this
         variant.outputs.map { it as com.android.build.gradle.internal.api.BaseVariantOutputImpl }
             .forEach { output ->
-                output.outputFileName = "snorelore.apk"
+                output.outputFileName = "snorelore-${variant.versionName}.apk"
             }
     }
 }
