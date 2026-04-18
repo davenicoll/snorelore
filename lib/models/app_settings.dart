@@ -10,6 +10,7 @@ class AppSettings {
   final int postRollSeconds;
   final int maxSegmentSeconds;
   final int minSegmentSeconds;
+  final bool developerMode;
 
   const AppSettings({
     this.autoSchedule = false,
@@ -21,6 +22,7 @@ class AppSettings {
     this.postRollSeconds = 60,
     this.maxSegmentSeconds = 120,
     this.minSegmentSeconds = 2,
+    this.developerMode = false,
   });
 
   AppSettings copyWith({
@@ -33,6 +35,7 @@ class AppSettings {
     int? postRollSeconds,
     int? maxSegmentSeconds,
     int? minSegmentSeconds,
+    bool? developerMode,
   }) {
     return AppSettings(
       autoSchedule: autoSchedule ?? this.autoSchedule,
@@ -44,6 +47,7 @@ class AppSettings {
       postRollSeconds: postRollSeconds ?? this.postRollSeconds,
       maxSegmentSeconds: maxSegmentSeconds ?? this.maxSegmentSeconds,
       minSegmentSeconds: minSegmentSeconds ?? this.minSegmentSeconds,
+      developerMode: developerMode ?? this.developerMode,
     );
   }
 
@@ -59,6 +63,7 @@ class AppSettings {
         'postRollSeconds': postRollSeconds,
         'maxSegmentSeconds': maxSegmentSeconds,
         'minSegmentSeconds': minSegmentSeconds,
+        'developerMode': developerMode,
       };
 
   factory AppSettings.fromJson(Map<String, dynamic> j) => AppSettings(
@@ -79,6 +84,7 @@ class AppSettings {
         postRollSeconds: (j['postRollSeconds'] ?? j['cooldownSeconds']) as int? ?? 60,
         maxSegmentSeconds: j['maxSegmentSeconds'] as int? ?? 120,
         minSegmentSeconds: j['minSegmentSeconds'] as int? ?? 2,
+        developerMode: j['developerMode'] as bool? ?? false,
       );
 
   /// Amplitude threshold in dBFS. At sensitivity=0.0 we only pick up loud

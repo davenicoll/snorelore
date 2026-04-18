@@ -52,6 +52,14 @@ class StorageService {
     await _saveAll(all);
   }
 
+  Future<void> update(Recording r) async {
+    final all = await loadAll();
+    final idx = all.indexWhere((e) => e.id == r.id);
+    if (idx < 0) return;
+    all[idx] = r;
+    await _saveAll(all);
+  }
+
   Future<void> delete(Recording r) async {
     final all = await loadAll();
     all.removeWhere((e) => e.id == r.id);

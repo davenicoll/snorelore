@@ -13,12 +13,16 @@ class RecordingTile extends StatefulWidget {
   final Recording recording;
   final VoidCallback? onDelete;
   final VoidCallback? onShare;
+  final VoidCallback? onReanalyze;
+  final bool showReanalyze;
 
   const RecordingTile({
     super.key,
     required this.recording,
     this.onDelete,
     this.onShare,
+    this.onReanalyze,
+    this.showReanalyze = false,
   });
 
   @override
@@ -175,15 +179,17 @@ class _RecordingTileState extends State<RecordingTile> {
                           _TagRow(tags: r.tags),
                         ],
                         if (!_expanded) ...[
-                          const SizedBox(height: 6),
+                          const SizedBox(height: 8),
                           SizedBox(
-                            height: 26,
+                            height: 38,
                             child: CustomPaint(
-                              size: const Size.fromHeight(26),
+                              size: const Size.fromHeight(38),
                               painter: WaveformPainter(
                                 samples: r.waveform,
                                 color:
-                                    info.color.withValues(alpha: 0.55),
+                                    info.color.withValues(alpha: 0.9),
+                                barWidth: 1.5,
+                                gap: 1.0,
                               ),
                             ),
                           ),
@@ -198,10 +204,15 @@ class _RecordingTileState extends State<RecordingTile> {
                     onSelected: (v) {
                       if (v == 'delete') widget.onDelete?.call();
                       if (v == 'share') widget.onShare?.call();
+                      if (v == 'reanalyze') widget.onReanalyze?.call();
                     },
-                    itemBuilder: (_) => const [
-                      PopupMenuItem(value: 'share', child: Text('Share')),
-                      PopupMenuItem(value: 'delete', child: Text('Delete')),
+                    itemBuilder: (_) => [
+                      const PopupMenuItem(value: 'share', child: Text('Share')),
+                      if (widget.showReanalyze)
+                        const PopupMenuItem(
+                            value: 'reanalyze',
+                            child: Text('Reanalyze recording')),
+                      const PopupMenuItem(value: 'delete', child: Text('Delete')),
                     ],
                   ),
                 ],
@@ -264,6 +275,8 @@ class _RecordingTileState extends State<RecordingTile> {
                       progress: progress.clamp(0.0, 1.0),
                       color: info.color.withValues(alpha: 0.35),
                       playedColor: info.color,
+                      barWidth: 2.0,
+                      gap: 1.5,
                     ),
                   ),
                 ),
