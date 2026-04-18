@@ -4,8 +4,9 @@ import 'package:share_plus/share_plus.dart';
 
 import '../app_services.dart';
 import '../models/recording.dart';
+import '../utils/categories.dart';
 import '../utils/theme.dart';
-import '../widgets/recording_tile.dart';
+import '../widgets/category_recording_tile.dart';
 
 class NightDetailScreen extends StatefulWidget {
   final DateTime night;
@@ -129,9 +130,29 @@ class _NightDetailScreenState extends State<NightDetailScreen> {
     if (mounted) Navigator.pop(context);
   }
 
+  /// Bucket the clips by display category. One clip can land in multiple
+  /// buckets when its primary, tags or per-segment categories fan out
+  /// across them.
+  Map<DisplayCategory, List<Recording>> _groupByDisplayCategory() {
+    final out = <DisplayCategory, List<Recording>>{};
+    for (final r in _recordings) {
+      final buckets =
+          displayCategoriesFor(r.category, r.tags, r.windowCategories);
+      for (final d in buckets) {
+        out.putIfAbsent(d, () => []).add(r);
+      }
+    }
+    for (final list in out.values) {
+      list.sort((a, b) => a.startedAt.compareTo(b.startedAt));
+    }
+    return out;
+  }
+
   @override
   Widget build(BuildContext context) {
     final label = DateFormat('EEEE, MMM d').format(widget.night);
+    final grouped = _groupByDisplayCategory();
+
     return Scaffold(
       appBar: AppBar(
         title: Text(label),
@@ -150,22 +171,98 @@ class _NightDetailScreenState extends State<NightDetailScreen> {
                 child: Text('No clips for this night',
                     style: TextStyle(color: AppColors.textMuted)),
               )
-            : ListView.separated(
-                padding: const EdgeInsets.fromLTRB(16, 8, 16, 24),
-                itemCount: _recordings.length,
-                separatorBuilder: (_, _) => const SizedBox(height: 10),
-                itemBuilder: (_, i) {
-                  final r = _recordings[i];
-                  return RecordingTile(
-                    key: ValueKey(r.id),
-                    recording: r,
-                    onDelete: () => _deleteRecording(r),
-                    onShare: () => _shareRecording(r),
-                    showReanalyze: _developerMode,
-                    onReanalyze: () => _reanalyzeRecording(r),
-                  );
-                },
+            : ListView(
+                padding: const EdgeInsets.fromLTRB(12, 8, 12, 24),
+                children: [
+                  for (final cat in DisplayCategory.values)
+                    if ((grouped[cat]?.isNotEmpty ?? false))
+                      _CategorySection(
+                        key: ValueKey('section-${cat.name}'),
+                        category: cat,
+                        recordings: grouped[cat]!,
+                        developerMode: _developerMode,
+                        onShare: _shareRecording,
+                        onDelete: _deleteRecording,
+                        onReanalyze: _reanalyzeRecording,
+                      ),
+                ],
               ),
+      ),
+    );
+  }
+}
+
+class _CategorySection extends StatelessWidget {
+  final DisplayCategory category;
+  final List<Recording> recordings;
+  final bool developerMode;
+  final Future<void> Function(Recording) onShare;
+  final Future<void> Function(Recording) onDelete;
+  final Future<void> Function(Recording) onReanalyze;
+
+  const _CategorySection({
+    super.key,
+    required this.category,
+    required this.recordings,
+    required this.developerMode,
+    required this.onShare,
+    required this.onDelete,
+    required this.onReanalyze,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final info = displayCategoryInfo[category]!;
+    return Container(
+      margin: const EdgeInsets.only(bottom: 10),
+      decoration: BoxDecoration(
+        color: AppColors.surface,
+        borderRadius: BorderRadius.circular(18),
+      ),
+      clipBehavior: Clip.antiAlias,
+      child: Theme(
+        data: Theme.of(context).copyWith(
+          dividerColor: Colors.transparent,
+          splashColor: Colors.transparent,
+          highlightColor: Colors.transparent,
+        ),
+        child: ExpansionTile(
+          initiallyExpanded: true,
+          tilePadding: const EdgeInsets.fromLTRB(14, 4, 14, 4),
+          childrenPadding: const EdgeInsets.fromLTRB(8, 0, 4, 6),
+          leading: Container(
+            width: 36,
+            height: 36,
+            decoration: BoxDecoration(
+              color: info.color.withValues(alpha: 0.18),
+              shape: BoxShape.circle,
+            ),
+            alignment: Alignment.center,
+            child: Icon(info.icon, color: info.color, size: 18),
+          ),
+          title: Text(
+            info.label,
+            style: const TextStyle(fontSize: 15, fontWeight: FontWeight.w600),
+          ),
+          subtitle: Text(
+            '${recordings.length} ${recordings.length == 1 ? 'clip' : 'clips'}',
+            style: const TextStyle(color: AppColors.textMuted, fontSize: 12),
+          ),
+          iconColor: info.color,
+          collapsedIconColor: AppColors.textMuted,
+          children: [
+            for (final r in recordings)
+              CategoryRecordingTile(
+                key: ValueKey('${category.name}-${r.id}'),
+                recording: r,
+                highlight: category,
+                onShare: () => onShare(r),
+                onDelete: () => onDelete(r),
+                onReanalyze: () => onReanalyze(r),
+                showReanalyze: developerMode,
+              ),
+          ],
+        ),
       ),
     );
   }

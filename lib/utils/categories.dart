@@ -421,3 +421,106 @@ const Set<SoundCategory> eventCategories = {
   SoundCategory.phone,
   SoundCategory.doorbell,
 };
+
+// ---------------------------------------------------------------------------
+// Display-level grouping
+//
+// The Night Detail screen shows recordings grouped under nine collapsible
+// sections. The granular [SoundCategory] set we classify with is richer
+// than the user needs in that view, so we map it down to a small list of
+// display buckets. Order of [DisplayCategory.values] is the order the
+// sections appear; skip any bucket with zero recordings.
+// ---------------------------------------------------------------------------
+
+enum DisplayCategory {
+  talking,
+  snoring,
+  farting,
+  coughing,
+  emotions,
+  warning,
+  pets,
+  music,
+  other,
+}
+
+class DisplayCategoryInfo {
+  final String label;
+  final IconData icon;
+  final Color color;
+  const DisplayCategoryInfo(this.label, this.icon, this.color);
+}
+
+const Map<DisplayCategory, DisplayCategoryInfo> displayCategoryInfo = {
+  DisplayCategory.talking: DisplayCategoryInfo('Talking', Icons.record_voice_over, AppColors.accent),
+  DisplayCategory.snoring: DisplayCategoryInfo('Snoring', Icons.bedtime, AppColors.primary),
+  DisplayCategory.farting: DisplayCategoryInfo('Farting', Icons.cloud, AppColors.teal),
+  DisplayCategory.coughing: DisplayCategoryInfo('Coughing', Icons.sick, AppColors.orange),
+  DisplayCategory.emotions: DisplayCategoryInfo('Emotions', Icons.mood, AppColors.pink),
+  DisplayCategory.warning: DisplayCategoryInfo('Warning', Icons.warning_amber, AppColors.red),
+  DisplayCategory.pets: DisplayCategoryInfo('Pets', Icons.pets, AppColors.amber),
+  DisplayCategory.music: DisplayCategoryInfo('Music', Icons.music_note, AppColors.cyan),
+  DisplayCategory.other: DisplayCategoryInfo('Other', Icons.graphic_eq, AppColors.textMuted),
+};
+
+/// Fold a granular [SoundCategory] into one of the nine display buckets.
+DisplayCategory displayCategoryOf(SoundCategory c) {
+  switch (c) {
+    case SoundCategory.speech:
+    case SoundCategory.whisper:
+      return DisplayCategory.talking;
+    case SoundCategory.snoring:
+      return DisplayCategory.snoring;
+    case SoundCategory.fart:
+      return DisplayCategory.farting;
+    case SoundCategory.cough:
+    case SoundCategory.sneeze:
+      return DisplayCategory.coughing;
+    case SoundCategory.cry:
+    case SoundCategory.laugh:
+    case SoundCategory.scream:
+    case SoundCategory.passion:
+      return DisplayCategory.emotions;
+    case SoundCategory.alarmClock:
+    case SoundCategory.alarmHousehold:
+    case SoundCategory.siren:
+    case SoundCategory.phone:
+    case SoundCategory.doorbell:
+    case SoundCategory.alarm:
+      return DisplayCategory.warning;
+    case SoundCategory.cat:
+    case SoundCategory.dog:
+    case SoundCategory.animal:
+      return DisplayCategory.pets;
+    case SoundCategory.music:
+      return DisplayCategory.music;
+    case SoundCategory.breathing:
+    case SoundCategory.traffic:
+    case SoundCategory.weather:
+    case SoundCategory.movementBed:
+    case SoundCategory.walking:
+    case SoundCategory.silence:
+    case SoundCategory.movement:
+    case SoundCategory.unknown:
+      return DisplayCategory.other;
+  }
+}
+
+/// The set of display buckets a recording belongs to — the primary plus
+/// any tag plus any per-segment category. That way a clip whose primary is
+/// Snoring but which contains a real sneeze window shows up under both
+/// Snoring and Coughing.
+Set<DisplayCategory> displayCategoriesFor(
+    SoundCategory primary,
+    List<SoundCategory> tags,
+    List<SoundCategory> windowCategories) {
+  final out = <DisplayCategory>{displayCategoryOf(primary)};
+  for (final t in tags) {
+    out.add(displayCategoryOf(t));
+  }
+  for (final w in windowCategories) {
+    if (w == SoundCategory.unknown || w == SoundCategory.silence) continue;
+    out.add(displayCategoryOf(w));
+  }
+  return out;
+}
