@@ -4,6 +4,7 @@ import 'package:package_info_plus/package_info_plus.dart';
 import '../app_services.dart';
 import '../models/app_settings.dart';
 import '../services/fgs_bridge.dart';
+import '../utils/categories.dart';
 import '../utils/theme.dart';
 
 class SettingsScreen extends StatefulWidget {
@@ -183,6 +184,59 @@ class _SettingsScreenState extends State<SettingsScreen> {
     }
   }
 
+  Future<void> _clearClassifications() async {
+    final svc = AppServices.of(context);
+    final all = await svc.storage.loadAll();
+    if (all.isEmpty) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('No recordings to clear')),
+      );
+      return;
+    }
+    if (!mounted) return;
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (_) => AlertDialog(
+        backgroundColor: AppColors.surface,
+        title: const Text('Clear all classifications?'),
+        content: Text(
+          'Resets category, tags and waveform colouring on all '
+          '${all.length} clips. Recordings themselves are not deleted. '
+          'You can re-run classification afterwards.',
+          style: const TextStyle(color: AppColors.textMuted),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context, false),
+            child: const Text('Cancel'),
+          ),
+          TextButton(
+            onPressed: () => Navigator.pop(context, true),
+            child: const Text('Clear',
+                style: TextStyle(color: AppColors.red)),
+          ),
+        ],
+      ),
+    );
+    if (ok != true) return;
+
+    final wiped = all
+        .map((r) => r.copyWith(
+              category: SoundCategory.unknown,
+              categoryLabel: 'Other',
+              categoryConfidence: 0,
+              tags: const [],
+              windowCategories: const [],
+            ))
+        .toList();
+    await svc.storage.replaceAll(wiped);
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(content: Text('Cleared classifications on ${wiped.length} clips')),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     final s = _settings;
@@ -356,6 +410,20 @@ class _SettingsScreenState extends State<SettingsScreen> {
                   trailing: const Icon(Icons.chevron_right,
                       color: AppColors.textMuted),
                   onTap: _reanalyzeAll,
+                ),
+                const Divider(height: 1),
+                ListTile(
+                  leading: const Icon(Icons.cleaning_services_outlined,
+                      color: AppColors.red),
+                  title: const Text('Clear all classifications'),
+                  subtitle: const Text(
+                    'Reset every clip to Other and strip waveform colouring',
+                    style:
+                        TextStyle(color: AppColors.textMuted, fontSize: 12),
+                  ),
+                  trailing: const Icon(Icons.chevron_right,
+                      color: AppColors.textMuted),
+                  onTap: _clearClassifications,
                 ),
               ],
             ),

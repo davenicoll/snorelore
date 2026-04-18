@@ -60,6 +60,13 @@ class StorageService {
     await _saveAll(all);
   }
 
+  /// Replace the entire index in one write. Used for bulk operations like
+  /// "clear all classifications" where touching every record via update()
+  /// would mean re-reading and re-writing the index N times.
+  Future<void> replaceAll(List<Recording> recs) async {
+    await _saveAll(List<Recording>.of(recs));
+  }
+
   Future<void> delete(Recording r) async {
     final all = await loadAll();
     all.removeWhere((e) => e.id == r.id);
