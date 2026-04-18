@@ -111,9 +111,16 @@ class ClassifierService {
   static const int _sustainedWindowBands = 10;
 
   /// Median filter length applied to each simplified category's per-band
-  /// score sequence before hysteresis. Length 3 kills isolated
-  /// single-band spikes without suppressing 2+-band runs.
+  /// score sequence. Length 3 kills isolated single-band spikes without
+  /// suppressing 2+-band runs.
   static const int _medianFilterLen = 3;
+
+  /// Raw (unpriored) per-band commit floor. A band whose winning
+  /// category scores below this is rendered as unknown. Chosen to match
+  /// real-world YAMNet scores for bedroom audio — clear snoring often
+  /// scores 0.12–0.30, quiet snoring dips lower; the median filter
+  /// handles the dips.
+  static const double _bandCommitThreshold = 0.10;
 
   /// Cap the total number of YAMNet inferences per clip. With 2
   /// inferences per 1 s band, 600 covers a 5-minute clip (matches the
@@ -152,17 +159,10 @@ class ClassifierService {
   /// momentary "Purr" firing in an otherwise snoring run) without
   /// suppressing 2+-band runs.
   ///
-  /// Stage 5 — hysteresis per category: asymmetric ON/OFF thresholds
-  /// with min-consecutive-bands requirements form clean event segments.
-  /// Events (sneeze, cough, alarm…) use ON=0.30 / OFF=0.10, min_on=1
-  /// (one strong band suffices) and min_off=1 (close immediately when
-  /// below OFF). Sustained categories use ON=0.18 / OFF=0.06, min_on=2
-  /// (reject single-band flicker) and min_off=3 (accept brief dips).
+  /// Stage 5 — per-band dominant category: priored argmax of the
+  /// median-filtered scores, gated by a 0.10 raw-confidence floor.
   ///
-  /// Stage 6 — per-band dominant category: priored argmax among the
-  /// categories whose hysteresis state is active at this band.
-  ///
-  /// Stage 7 — clip-level aggregation: per-category MAX across bands
+  /// Stage 6 — clip-level aggregation: per-category MAX across bands
   /// for events, max-over-rolling-10-band-mean for sustained. Priored
   /// argmax picks the clip primary; tags are other categories above
   /// the tag threshold.
@@ -258,31 +258,33 @@ class ClassifierService {
     perBandCat = _medianFilterPerCategory(
         perBandCat, bandSilent, _medianFilterLen);
 
-    // Stage 5 — hysteresis.
-    final activeByBand = _hysteresisEvents(perBandCat, bandSilent);
-
-    // Stage 6 — per-band dominant category.
+    // Stage 5 — per-band dominant category. Priored argmax of the
+    // median-filtered scores, gated by the raw-confidence floor. We
+    // tried a per-category hysteresis state machine here but the ON
+    // thresholds it needed to be tight (0.18+ for sustained) were
+    // routinely above real bedroom YAMNet scores, so clips were getting
+    // a clip-level primary without any matching per-band tints. The
+    // median filter already smooths score spikes before this argmax,
+    // which is what the DCASE community recommends as the main
+    // post-processing step.
     final windowCategories = <SoundCategory>[];
     for (var i = 0; i < numBands; i++) {
       if (bandSilent[i]) {
         windowCategories.add(SoundCategory.silence);
         continue;
       }
-      final active = activeByBand[i];
-      if (active.isEmpty) {
-        windowCategories.add(SoundCategory.unknown);
-        continue;
-      }
       SoundCategory winCat = SoundCategory.unknown;
+      double winRaw = 0;
       double winPriored = 0;
-      for (final c in active) {
-        final raw = perBandCat[i][c] ?? 0.0;
+      perBandCat[i].forEach((c, raw) {
         final priored = raw * (categoryPrior[c] ?? 1.0);
         if (priored > winPriored) {
           winPriored = priored;
+          winRaw = raw;
           winCat = c;
         }
-      }
+      });
+      if (winRaw < _bandCommitThreshold) winCat = SoundCategory.unknown;
       windowCategories.add(winCat);
     }
 
@@ -337,96 +339,6 @@ class ClassifierService {
     return out;
   }
 
-  /// Hysteresis event tracker. For each category, runs an ON/OFF state
-  /// machine over the band sequence to produce a set of "active" bands —
-  /// bands that belong to a committed event segment for that category.
-  /// Returns a list, one set per band, containing the categories active
-  /// at that band.
-  ///
-  /// Presets (ON, OFF, min_on, min_off):
-  ///   events:    0.30, 0.10, 1, 1  — a single strong band commits
-  ///   sustained: 0.18, 0.06, 2, 3  — two consecutive bands to open,
-  ///                                  three consecutive dips below OFF
-  ///                                  to close
-  ///
-  /// Silence bands force-close any active event for every category.
-  List<Set<SoundCategory>> _hysteresisEvents(
-      List<Map<SoundCategory, double>> perBand,
-      List<bool> silent) {
-    final activeByBand =
-        List.generate(perBand.length, (_) => <SoundCategory>{});
-    final allCats = <SoundCategory>{for (final m in perBand) ...m.keys};
-
-    for (final cat in allCats) {
-      final isEvent = eventCategories.contains(cat);
-      final onThresh = isEvent ? 0.30 : 0.18;
-      final offThresh = isEvent ? 0.10 : 0.06;
-      final minOn = isEvent ? 1 : 2;
-      final minOff = isEvent ? 1 : 3;
-
-      var state = false;
-      var consecOn = 0;
-      var consecOff = 0;
-      int? runStart;
-
-      for (var i = 0; i < perBand.length; i++) {
-        if (silent[i]) {
-          if (state && runStart != null) {
-            for (var j = runStart; j < i; j++) {
-              if (!silent[j]) activeByBand[j].add(cat);
-            }
-          }
-          state = false;
-          runStart = null;
-          consecOn = 0;
-          consecOff = 0;
-          continue;
-        }
-        final s = perBand[i][cat] ?? 0.0;
-        if (!state) {
-          if (s >= onThresh) {
-            runStart ??= i;
-            consecOn++;
-            if (consecOn >= minOn) {
-              state = true;
-              consecOff = 0;
-            }
-          } else {
-            runStart = null;
-            consecOn = 0;
-          }
-        } else {
-          if (s < offThresh) {
-            consecOff++;
-            if (consecOff >= minOff) {
-              // Last band still considered active is i - minOff.
-              final closeEnd = i - minOff + 1; // exclusive
-              if (runStart != null) {
-                for (var j = runStart; j < closeEnd; j++) {
-                  if (!silent[j]) activeByBand[j].add(cat);
-                }
-              }
-              state = false;
-              runStart = null;
-              consecOn = 0;
-              consecOff = 0;
-            }
-          } else {
-            consecOff = 0;
-          }
-        }
-      }
-
-      // Close any run still open at the end of the clip.
-      if (state && runStart != null) {
-        for (var j = runStart; j < perBand.length; j++) {
-          if (!silent[j]) activeByBand[j].add(cat);
-        }
-      }
-    }
-
-    return activeByBand;
-  }
 
   ClipClassification? _pickPrimaryAndTags(
       List<Map<SoundCategory, double>> perBand,
