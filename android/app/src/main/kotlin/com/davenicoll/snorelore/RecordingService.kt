@@ -5,15 +5,22 @@ import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.PendingIntent
 import android.app.Service
+import android.content.Context
 import android.content.Intent
 import android.content.pm.ServiceInfo
 import android.os.Build
 import android.os.IBinder
+import android.os.PowerManager
 
 /**
  * Minimal microphone-type foreground service. Its only job is to keep the
  * process alive while SnoreLore is listening; all recording logic stays in
  * the Flutter main isolate.
+ *
+ * Holds a PARTIAL_WAKE_LOCK for the duration of the session. Without it,
+ * Doze-mode CPU throttling can pause the audio stream when the screen is
+ * off — even though the foreground service keeps the process alive. The
+ * wake lock keeps the CPU on; it does not keep the screen on.
  */
 class RecordingService : Service() {
 
@@ -23,13 +30,17 @@ class RecordingService : Service() {
         private const val CHANNEL_ID = "snorelore_recording"
         private const val CHANNEL_NAME = "SnoreLore recording"
         private const val NOTIFICATION_ID = 1001
+        private const val WAKE_LOCK_TAG = "snorelore:recording"
     }
+
+    private var wakeLock: PowerManager.WakeLock? = null
 
     override fun onBind(intent: Intent?): IBinder? = null
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         when (intent?.action) {
             ACTION_STOP -> {
+                releaseWakeLock()
                 stopForeground(STOP_FOREGROUND_REMOVE)
                 stopSelf()
                 return START_NOT_STICKY
@@ -46,9 +57,34 @@ class RecordingService : Service() {
                 } else {
                     startForeground(NOTIFICATION_ID, notification)
                 }
+                acquireWakeLock()
             }
         }
         return START_STICKY
+    }
+
+    override fun onDestroy() {
+        releaseWakeLock()
+        super.onDestroy()
+    }
+
+    private fun acquireWakeLock() {
+        if (wakeLock?.isHeld == true) return
+        val pm = getSystemService(Context.POWER_SERVICE) as? PowerManager ?: return
+        val lock = pm.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, WAKE_LOCK_TAG)
+        lock.setReferenceCounted(false)
+        try {
+            lock.acquire()
+        } catch (_: Throwable) {}
+        wakeLock = lock
+    }
+
+    private fun releaseWakeLock() {
+        val lock = wakeLock ?: return
+        wakeLock = null
+        try {
+            if (lock.isHeld) lock.release()
+        } catch (_: Throwable) {}
     }
 
     private fun ensureChannel() {
