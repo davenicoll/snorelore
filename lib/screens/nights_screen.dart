@@ -104,9 +104,7 @@ class _NightCard extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final fmt = DateFormat('EEEE, MMM d');
-    final nextDay = night.add(const Duration(days: 1));
     final label = fmt.format(night);
-    final endLabel = DateFormat('MMM d').format(nextDay);
 
     final counts = <SoundCategory, int>{};
     for (final r in recordings) {
@@ -131,21 +129,10 @@ class _NightCard extends StatelessWidget {
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              Row(
-                children: [
-                  Expanded(
-                    child: Text(
-                      label,
-                      style: const TextStyle(
-                          fontSize: 16, fontWeight: FontWeight.w700),
-                    ),
-                  ),
-                  Text(
-                    '→ $endLabel',
-                    style: const TextStyle(
-                        color: AppColors.textMuted, fontSize: 12),
-                  ),
-                ],
+              Text(
+                label,
+                style: const TextStyle(
+                    fontSize: 16, fontWeight: FontWeight.w700),
               ),
               const SizedBox(height: 4),
               Text(

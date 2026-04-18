@@ -10,6 +10,7 @@ class Recording {
   final SoundCategory category;
   final String categoryLabel;
   final double categoryConfidence;
+  final List<SoundCategory> tags;
   final List<double> waveform;
 
   const Recording({
@@ -22,6 +23,7 @@ class Recording {
     required this.category,
     required this.categoryLabel,
     required this.categoryConfidence,
+    this.tags = const [],
     required this.waveform,
   });
 
@@ -47,6 +49,7 @@ class Recording {
         'category': category.name,
         'categoryLabel': categoryLabel,
         'categoryConfidence': categoryConfidence,
+        'tags': tags.map((t) => t.name).toList(),
         'waveform': waveform,
       };
 
@@ -63,6 +66,13 @@ class Recording {
         ),
         categoryLabel: j['categoryLabel'] as String? ?? 'Other',
         categoryConfidence: (j['categoryConfidence'] as num?)?.toDouble() ?? 0,
+        tags: ((j['tags'] as List?) ?? const [])
+            .map((e) => SoundCategory.values.firstWhere(
+                  (c) => c.name == e,
+                  orElse: () => SoundCategory.unknown,
+                ))
+            .where((c) => c != SoundCategory.unknown)
+            .toList(),
         waveform: ((j['waveform'] as List?) ?? [])
             .map((e) => (e as num).toDouble())
             .toList(),

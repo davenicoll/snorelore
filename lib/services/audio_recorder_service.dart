@@ -235,8 +235,7 @@ class AudioRecorderService {
       _peakDb = math.max(_peakDb, db);
       _sumDb += db;
       _dbSamples++;
-      final normalised = ((db + 60) / 60).clamp(0.0, 1.0);
-      _waveform.add(normalised);
+      _waveform.addAll(_subSamples(chunk));
 
       final capAge = now.difference(_captureStartedAt!);
       final silence = _lastLoudAt == null
@@ -305,8 +304,34 @@ class AudioRecorderService {
       _sumDb += db * n;
       _dbSamples += n;
       _peakDb = math.max(_peakDb, db);
-      _waveform.add(((db + 60) / 60).clamp(0.0, 1.0));
+      _waveform.addAll(_subSamples(c));
     }
+  }
+
+  /// Produce multiple waveform points per PCM chunk so that short clips
+  /// still render with fine-grained bars. Each point covers a ~20 ms window
+  /// (320 samples at 16 kHz) so we get ~50 points per second of audio.
+  static const int _wfWindowSamples = 320;
+  List<double> _subSamples(Uint8List chunk) {
+    final n = chunk.length ~/ _bytesPerSample;
+    if (n == 0) return const [];
+    final bd = ByteData.sublistView(chunk);
+    final out = <double>[];
+    for (var start = 0; start < n; start += _wfWindowSamples) {
+      final end = math.min(start + _wfWindowSamples, n);
+      var peak = 0;
+      for (var i = start; i < end; i++) {
+        final s = bd.getInt16(i * _bytesPerSample, Endian.little).abs();
+        if (s > peak) peak = s;
+      }
+      if (peak == 0) {
+        out.add(0);
+        continue;
+      }
+      final db = 20 * (math.log(peak / 32768.0) / math.ln10);
+      out.add(((db + 60) / 60).clamp(0.0, 1.0));
+    }
+    return out;
   }
 
   Future<void> _finalizeCapture({bool forced = false}) async {
@@ -317,7 +342,7 @@ class AudioRecorderService {
     final startedAt = _captureStartedAt!;
     final peak = _peakDb;
     final avgDb = _dbSamples == 0 ? -100.0 : _sumDb / _dbSamples;
-    final wf = _downsample(_waveform, 120);
+    final wf = _downsample(_waveform, 240);
 
     _captureChunks.clear();
     _captureBytes = 0;
@@ -352,12 +377,14 @@ class AudioRecorderService {
     SoundCategory cat = SoundCategory.unknown;
     String catLabel = 'Other';
     double conf = 0;
+    List<SoundCategory> tags = const [];
     try {
       final r = await _classifier.classifyWavFile(wavPath);
       if (r != null) {
-        cat = r.category;
-        catLabel = r.label;
-        conf = r.confidence;
+        cat = r.primary.category;
+        catLabel = r.primary.label;
+        conf = r.primary.confidence;
+        tags = r.tags.map((t) => t.category).toList();
       }
     } catch (_) {}
 
@@ -371,6 +398,7 @@ class AudioRecorderService {
       category: cat,
       categoryLabel: catLabel,
       categoryConfidence: conf,
+      tags: tags,
       waveform: wf,
     );
     await _storage.add(rec);

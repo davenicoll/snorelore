@@ -5,6 +5,7 @@ import 'theme.dart';
 /// YAMNet labels get collapsed into these.
 enum SoundCategory {
   snoring,
+  passion,
   cough,
   speech,
   laugh,
@@ -28,8 +29,9 @@ class CategoryInfo {
 
 const Map<SoundCategory, CategoryInfo> categoryInfo = {
   SoundCategory.snoring: CategoryInfo('Snoring', Icons.bedtime, AppColors.primary),
+  SoundCategory.passion: CategoryInfo('Passion', Icons.favorite, AppColors.pink),
   SoundCategory.cough: CategoryInfo('Cough', Icons.sick, AppColors.orange),
-  SoundCategory.speech: CategoryInfo('Sleep-talk', Icons.record_voice_over, AppColors.accent),
+  SoundCategory.speech: CategoryInfo('Speech', Icons.record_voice_over, AppColors.accent),
   SoundCategory.laugh: CategoryInfo('Laugh', Icons.mood, AppColors.pink),
   SoundCategory.cry: CategoryInfo('Cry', Icons.water_drop, AppColors.teal),
   SoundCategory.alarm: CategoryInfo('Alarm', Icons.notifications_active, AppColors.red),
@@ -43,9 +45,17 @@ const Map<SoundCategory, CategoryInfo> categoryInfo = {
 };
 
 /// Map a YAMNet display name (from class map) to one of our simplified categories.
+///
+/// YAMNet returns 521 raw labels (see assets/models/yamnet_class_map.csv).
+/// Tuning the app's category assignments mostly means editing the keyword
+/// matches below — add, reorder or narrow them to taste.
 SoundCategory mapYamnetLabel(String name) {
   final n = name.toLowerCase();
-  if (n.contains('snor')) return SoundCategory.snoring;
+  if (n.contains('snor') || n.contains('snort')) return SoundCategory.snoring;
+  // Moan/Wail/Groan → passion. YAMNet can't tell us how many people are in
+  // the room, so we take these intimate vocalisations as the strongest
+  // signal available.
+  if (n.contains('moan') || n.contains('groan')) return SoundCategory.passion;
   if (n.contains('cough') || n.contains('throat')) return SoundCategory.cough;
   if (n.contains('sneez')) return SoundCategory.cough;
   if (n.contains('laugh') || n.contains('giggl') || n.contains('chuckl') || n.contains('chortl')) {
@@ -84,3 +94,23 @@ SoundCategory mapYamnetLabel(String name) {
   }
   return SoundCategory.unknown;
 }
+
+/// When several YAMNet classes score close together, prefer the ones we care
+/// most about for a sleep journal. e.g. if "Cat purring" wins 0.32 and
+/// "Snoring" comes in second at 0.25, we'd rather label the clip as snoring.
+const List<SoundCategory> categoryPriority = [
+  SoundCategory.snoring,
+  SoundCategory.passion,
+  SoundCategory.cough,
+  SoundCategory.cry,
+  SoundCategory.laugh,
+  SoundCategory.speech,
+  SoundCategory.alarm,
+  SoundCategory.phone,
+  SoundCategory.doorbell,
+  SoundCategory.breathing,
+  SoundCategory.music,
+  SoundCategory.animal,
+  SoundCategory.movement,
+  SoundCategory.unknown,
+];

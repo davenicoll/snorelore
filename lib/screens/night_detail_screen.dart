@@ -6,7 +6,6 @@ import '../app_services.dart';
 import '../models/recording.dart';
 import '../utils/theme.dart';
 import '../widgets/recording_tile.dart';
-import 'recording_detail_screen.dart';
 
 class NightDetailScreen extends StatefulWidget {
   final DateTime night;
@@ -112,16 +111,8 @@ class _NightDetailScreenState extends State<NightDetailScreen> {
               itemBuilder: (_, i) {
                 final r = _recordings[i];
                 return RecordingTile(
+                  key: ValueKey(r.id),
                   recording: r,
-                  onTap: () async {
-                    await Navigator.push(
-                      context,
-                      MaterialPageRoute(
-                        builder: (_) => RecordingDetailScreen(recording: r),
-                      ),
-                    );
-                    _refresh();
-                  },
                   onDelete: () => _deleteRecording(r),
                   onShare: () => _shareRecording(r),
                 );
