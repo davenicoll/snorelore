@@ -144,8 +144,12 @@ class ClassifierService {
 
   /// Peak amplitude below which a segment is treated as silent regardless
   /// of what YAMNet scored. Measured on the float32 [-1,1] samples as
-  /// peak-dBFS: anything below -50 dBFS is pretty much room tone.
-  static const double _silenceThresholdDb = -50;
+  /// peak-dBFS on the pre-gain signal. The v0.13.0 5× gain boost
+  /// effectively adds +14 dB to quiet bands at inference time, so a raw
+  /// -65 dBFS signal lands around -51 dBFS post-gain — still classifiable
+  /// by YAMNet. The previous -50 dBFS floor was gating out quiet sleep
+  /// sounds that would have classified fine after gain.
+  static const double _silenceThresholdDb = -65;
 
   /// Length of one display band on the waveform (1 s). Each band is
   /// produced from up to [_inferencesPerBand] overlapping YAMNet

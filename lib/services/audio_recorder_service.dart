@@ -418,7 +418,7 @@ class AudioRecorderService {
       return;
     }
 
-    final rec = Recording(
+    var rec = Recording(
       id: _uuid.v4(),
       filePath: wavPath,
       startedAt: startedAt,
@@ -433,6 +433,10 @@ class AudioRecorderService {
       windowCategories: windowCats,
       windowCategoriesSecondary: windowCatsSecondary,
     );
+    // Trim dead silence off the ends — amplitude VAD captures with a
+    // long post-roll so clips are often mostly silent around the real
+    // event.
+    rec = await _storage.trimToActiveRange(rec);
     await _storage.add(rec);
     _segmentsCaptured++;
     for (final cb in _listeners) {
