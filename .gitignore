@@ -49,3 +49,6 @@ app.*.map.json
 
 # Reference APKs (decompiled for study, do not commit)
 *.apk
+
+# Reference xapks (decompiled for study, do not commit)
+*.xapk
