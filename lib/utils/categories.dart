@@ -327,7 +327,11 @@ enum CategoryAggregation { max, mean }
 
 const Map<SoundCategory, CategoryAggregation> categoryAggregation = {
   SoundCategory.snoring: CategoryAggregation.mean,
-  SoundCategory.talking: CategoryAggregation.mean,
+  // Silero produces high-confidence scores (≥0.5) on any voice band.
+  // MAX aggregation at the clip level means a single strong voice band
+  // commits the clip primary to Talking — matches the product intent
+  // for a sleep-talking capture app.
+  SoundCategory.talking: CategoryAggregation.max,
   SoundCategory.events: CategoryAggregation.max,
   SoundCategory.pets: CategoryAggregation.max,
   SoundCategory.music: CategoryAggregation.mean,

@@ -9,6 +9,7 @@ import 'services/audio_playback_service.dart';
 import 'services/audio_recorder_service.dart';
 import 'services/classifier_service.dart';
 import 'services/settings_service.dart';
+import 'services/silero_vad_service.dart';
 import 'services/storage_service.dart';
 import 'utils/theme.dart';
 
@@ -23,12 +24,14 @@ Future<void> main() async {
 
   final settings = SettingsService();
   final storage = StorageService();
-  final classifier = ClassifierService();
+  final silero = SileroVadService();
+  final classifier = ClassifierService(silero: silero);
   final recorder = AudioRecorderService(storage, classifier);
   final playback = AudioPlaybackService();
 
-  // Warm up the classifier so the first clip doesn't stall on inference.
+  // Warm up both inference models so the first clip doesn't stall.
   unawaited(classifier.init());
+  unawaited(silero.init());
 
   runApp(SnoreLoreApp(
     settings: settings,

@@ -6,6 +6,7 @@ import 'package:flutter/services.dart';
 import 'package:tflite_flutter/tflite_flutter.dart';
 
 import '../utils/categories.dart';
+import 'silero_vad_service.dart';
 
 class ClassificationResult {
   final SoundCategory category;
@@ -55,6 +56,14 @@ class ClassifierService {
   static const String _labelsAsset = 'assets/models/yamnet_class_map.csv';
   static const int _frame = 15600;
 
+  /// Minimum Silero voice probability to commit a band to Talking
+  /// without even running YAMNet. 0.5 is Silero's own idiomatic
+  /// threshold.
+  static const double _sileroVoiceThreshold = 0.5;
+
+  final SileroVadService? _silero;
+  ClassifierService({SileroVadService? silero}) : _silero = silero;
+
   Interpreter? _interp;
   List<String> _labels = const [];
   List<SoundCategory> _labelCategories = const [];
@@ -97,6 +106,16 @@ class ClassifierService {
     'Pant',
     'Sigh',
     'Sniff',
+    // Speech-family: handled by Silero VAD, denied here so YAMNet's
+    // own over-firing Speech classes can't compete with snoring /
+    // events / pets / music for the per-band argmax.
+    'Speech',
+    'Child speech, kid speaking',
+    'Conversation',
+    'Narration, monologue',
+    'Babbling',
+    'Speech synthesizer',
+    'Whispering',
   };
 
   Future<void> init() async {
@@ -180,7 +199,7 @@ class ClassifierService {
     final bytes = await file.readAsBytes();
     final samples = _decodePcm16MonoFromWav(bytes);
     if (samples.isEmpty) return null;
-    return _classifySamples(samples);
+    return await _classifySamples(samples);
   }
 
   /// Classifies the clip at 1 s band granularity with a multi-stage
@@ -212,7 +231,7 @@ class ClassifierService {
   /// for events, max-over-rolling-10-band-mean for sustained. Priored
   /// argmax picks the clip primary; tags are other categories above
   /// the tag threshold.
-  ClipClassification? _classifySamples(Float32List samples) {
+  Future<ClipClassification?> _classifySamples(Float32List samples) async {
     final interp = _interp;
     if (interp == null || samples.isEmpty) return null;
 
@@ -224,6 +243,11 @@ class ClassifierService {
         : (samples.length / numBands).floor();
 
     final bandSilent = List<bool>.filled(numBands, false);
+    // Bands that Silero VAD committed to the Talking bucket. For these
+    // bands we skip YAMNet inference entirely and seed the per-band
+    // score map directly in stage 3.
+    final bandVoice = List<bool>.filled(numBands, false);
+    final bandVoiceProb = Float32List(numBands);
     // Per-band 521-class scores: MAX across the overlapping inferences in
     // each band.
     final perBandRaw =
@@ -249,6 +273,33 @@ class ClassifierService {
       if (bandDb < _silenceThresholdDb) {
         bandSilent[i] = true;
         continue;
+      }
+
+      // Stage 2.5 — Silero VAD gate for the Talking bucket. Silero is a
+      // dedicated speech classifier, much more reliable than YAMNet's
+      // Speech class on bedroom audio. If Silero fires above its
+      // idiomatic threshold we commit this band to Talking and skip
+      // YAMNet entirely — saves inference work AND removes the
+      // Speech/Snoring/Breathing sibling fight that was YAMNet's
+      // biggest failure mode on overnight audio.
+      final silero = _silero;
+      if (silero != null && silero.ready) {
+        final bandSamples = Float32List.sublistView(
+          samples,
+          bandStart,
+          math.min(bandEnd, samples.length),
+        );
+        try {
+          final voiceProb =
+              await silero.voiceProbabilityForBand(bandSamples);
+          if (voiceProb >= _sileroVoiceThreshold) {
+            bandVoice[i] = true;
+            bandVoiceProb[i] = voiceProb;
+            continue; // skip YAMNet
+          }
+        } catch (_) {
+          // If Silero fails, fall through to YAMNet.
+        }
       }
 
       // Stage 1 — overlapping inferences. Each frame is 0.975 s. We
@@ -307,11 +358,18 @@ class ClassifierService {
       }
     }
 
-    // Stage 3 — collapse to simplified categories, per band.
+    // Stage 3 — collapse to simplified categories, per band. Voice
+    // bands (from Silero) skip the YAMNet collapse entirely and get
+    // their Talking score set directly from Silero's voice probability.
     var perBandCat =
         List.generate(numBands, (_) => <SoundCategory, double>{});
     for (var i = 0; i < numBands; i++) {
       if (bandSilent[i]) continue;
+      if (bandVoice[i]) {
+        perBandCat[i][SoundCategory.talking] =
+            bandVoiceProb[i].toDouble();
+        continue;
+      }
       final row = perBandRaw[i];
       final perCat = perBandCat[i];
       for (var k = 0; k < 521; k++) {
