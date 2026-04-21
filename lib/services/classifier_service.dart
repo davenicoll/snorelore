@@ -58,7 +58,34 @@ class ClassifierService {
   Interpreter? _interp;
   List<String> _labels = const [];
   List<SoundCategory> _labelCategories = const [];
+  Set<int> _denyListIndices = const {};
   bool _initialising = false;
+
+  /// Pre-inference gain applied to the float32 PCM frame fed to YAMNet,
+  /// with hard clipping to ±1.0. Boosts quiet bedroom signals into the
+  /// SNR regime YAMNet was trained on — a quiet snore that raw-scored
+  /// 0.05 may score 0.3+ after boosting. This is the single most
+  /// impactful trick in the Sleep Talk Recorder pipeline, where they
+  /// use 6.7× on int16; 5× on our float32 pipeline is roughly
+  /// equivalent in dynamic-range terms while leaving a little headroom
+  /// for louder sounds that might otherwise hard-clip.
+  static const double _preInferenceGain = 5.0;
+
+  /// AudioSet label names whose scores we zero out before any
+  /// downstream processing. These are pure-noise classes that fire on
+  /// fan noise, AC hum, and electrical buzz — they dilute the real
+  /// signals we care about. Sleep Talk Recorder uses the equivalent of
+  /// this via the TFLite Task Library's `setLabelDenyList`; we apply
+  /// it post-inference on the raw 521-class scores.
+  static const Set<String> _denyListLabelNames = {
+    'Silence',
+    'Humming',
+    'Sine wave',
+    'Static',
+    'Mains hum',
+    'White noise',
+    'Pink noise',
+  };
 
   Future<void> init() async {
     if (_interp != null || _initialising) return;
@@ -79,6 +106,11 @@ class ClassifierService {
           .toList();
       _labelCategories =
           _labels.map((l) => mapYamnetLabel(l)).toList(growable: false);
+      final deny = <int>{};
+      for (var i = 0; i < _labels.length; i++) {
+        if (_denyListLabelNames.contains(_labels[i])) deny.add(i);
+      }
+      _denyListIndices = deny;
     } catch (e) {
       // Leave _interp null; the caller will gracefully skip classification.
     } finally {
@@ -207,20 +239,26 @@ class ClassifierService {
       // aggregate the 2 frames per band via geometric mean per class —
       // more calibrated than MAX (Kittler/Hatef 1998 on sum/product
       // combining rules). MAX biases toward whichever frame was noisy.
+      //
+      // Pre-inference: apply _preInferenceGain and hard-clip to ±1.0.
+      // Borrowed from Sleep Talk Recorder's pipeline (they use 6.7×
+      // on int16). Pushes quiet bedroom audio into YAMNet's trained
+      // SNR range so a quiet snore scores in the 0.2–0.5 band
+      // instead of 0.05.
+      //
+      // Post-inference: zero out deny-list indices (Silence, Humming,
+      // Sine wave, Static, Mains hum, White/Pink noise) so they
+      // can't contaminate the downstream per-category collapse.
       var inferCount = 0;
       for (final off in inferOffsets) {
         final frameStart = bandStart + off;
         if (frameStart >= samples.length) break;
-        Float32List frame;
-        if (frameStart + _frame <= samples.length) {
-          frame = Float32List.sublistView(
-              samples, frameStart, frameStart + _frame);
-        } else {
-          frame = Float32List(_frame);
-          final avail = samples.length - frameStart;
-          for (var j = 0; j < avail; j++) {
-            frame[j] = samples[frameStart + j];
-          }
+        final frame = Float32List(_frame);
+        final avail =
+            math.min(_frame, samples.length - frameStart);
+        for (var j = 0; j < avail; j++) {
+          final v = samples[frameStart + j] * _preInferenceGain;
+          frame[j] = v > 1.0 ? 1.0 : (v < -1.0 ? -1.0 : v);
         }
         try {
           interp.runForMultipleInputs(
@@ -242,6 +280,9 @@ class ClassifierService {
           }
         }
         inferCount++;
+      }
+      for (final idx in _denyListIndices) {
+        perBandRaw[i][idx] = 0.0;
       }
     }
 
