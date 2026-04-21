@@ -145,6 +145,12 @@ class _NightDetailScreenState extends State<NightDetailScreen> {
     if (mounted) Navigator.pop(context);
   }
 
+  /// Multi-bucket grouping. A clip lands under every display bucket
+  /// that its primary, any tag, or any per-second window category
+  /// folds into — so a snore clip with a clear talking segment appears
+  /// under both Snoring and Talking. Section header counts equal list
+  /// lengths and sum to more than the unique clip count; the Nights
+  /// list summary uses the same per-bucket counts for consistency.
   Map<DisplayCategory, List<Recording>> _groupByDisplayCategory() {
     final out = <DisplayCategory, List<Recording>>{};
     for (final r in _recordings) {

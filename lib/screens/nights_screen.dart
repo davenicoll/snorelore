@@ -108,9 +108,20 @@ class _NightCard extends StatelessWidget {
     final fmt = DateFormat('EEEE, MMM d');
     final label = fmt.format(night);
 
-    final counts = <SoundCategory, int>{};
+    // Multi-bucket counts — match the Night Detail's per-section
+    // numbers. A clip lands under every bucket that its primary, tags,
+    // or any per-second window category folds into, so sums can exceed
+    // the unique clip count above.
+    final counts = <DisplayCategory, int>{};
     for (final r in recordings) {
-      counts[r.category] = (counts[r.category] ?? 0) + 1;
+      final buckets = displayCategoriesFor(
+        r.category,
+        r.tags,
+        [...r.windowCategories, ...r.windowCategoriesSecondary],
+      );
+      for (final b in buckets) {
+        counts[b] = (counts[b] ?? 0) + 1;
+      }
     }
     final top = counts.entries.toList()
       ..sort((a, b) => b.value.compareTo(a.value));
@@ -147,7 +158,7 @@ class _NightCard extends StatelessWidget {
                 spacing: 8,
                 runSpacing: 8,
                 children: top.take(5).map((e) {
-                  final info = categoryInfo[e.key]!;
+                  final info = displayCategoryInfo[e.key]!;
                   return Container(
                     padding: const EdgeInsets.symmetric(
                         horizontal: 10, vertical: 6),
