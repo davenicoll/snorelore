@@ -72,12 +72,18 @@ class ClassifierService {
   static const double _preInferenceGain = 5.0;
 
   /// AudioSet label names whose scores we zero out before any
-  /// downstream processing. These are pure-noise classes that fire on
-  /// fan noise, AC hum, and electrical buzz — they dilute the real
-  /// signals we care about. Sleep Talk Recorder uses the equivalent of
-  /// this via the TFLite Task Library's `setLabelDenyList`; we apply
-  /// it post-inference on the raw 521-class scores.
+  /// downstream processing. Two groups:
+  ///
+  ///   Pure-noise classes (fan / AC / mains hum / etc.) — always dilute
+  ///   real signals.
+  ///
+  ///   Breathing-family classes — YAMNet fires these as "everything
+  ///   during sleep", which swamps the specific classifications
+  ///   (snoring, speech) we actually want. Sleep Talk Recorder denies
+  ///   `Breathing` for the same reason and their pipeline is the
+  ///   prior-art reference for this choice.
   static const Set<String> _denyListLabelNames = {
+    // Noise
     'Silence',
     'Humming',
     'Sine wave',
@@ -85,6 +91,12 @@ class ClassifierService {
     'Mains hum',
     'White noise',
     'Pink noise',
+    // Breathing-family: YAMNet dominance attractor for quiet sleep audio
+    'Breathing',
+    'Gasp',
+    'Pant',
+    'Sigh',
+    'Sniff',
   };
 
   Future<void> init() async {
@@ -120,15 +132,15 @@ class ClassifierService {
 
   bool get ready => _interp != null && _labels.isNotEmpty;
 
-  /// Confidence floor for promoting a non-primary category onto the clip as
-  /// a tag. YAMNet scores are softmax probabilities across 521 classes, so
-  /// anything approaching 0.2 is a reasonably strong signal.
-  static const double _tagThreshold = 0.20;
+  /// Confidence floor for promoting a non-primary category onto the clip
+  /// as a tag. Raised in v0.13.1 to match post-gain score distributions —
+  /// the 5× pre-inference gain inflates typical YAMNet scores, so the
+  /// pre-gain 0.20 was too permissive.
+  static const double _tagThreshold = 0.35;
 
-  /// Below this, we refuse to commit to any category and the clip is filed
-  /// as "Other". Picking a noisy top category for a clip that's really just
-  /// room tone produces the mis-labels the user is seeing.
-  static const double _primaryMinConfidence = 0.10;
+  /// Below this, we refuse to commit to any category and the clip is
+  /// filed as "Other". Raised post-gain from 0.10.
+  static const double _primaryMinConfidence = 0.20;
 
   /// Peak amplitude below which a segment is treated as silent regardless
   /// of what YAMNet scored. Measured on the float32 [-1,1] samples as
@@ -240,15 +252,16 @@ class ClassifierService {
       // more calibrated than MAX (Kittler/Hatef 1998 on sum/product
       // combining rules). MAX biases toward whichever frame was noisy.
       //
-      // Pre-inference: apply _preInferenceGain and hard-clip to ±1.0.
-      // Borrowed from Sleep Talk Recorder's pipeline (they use 6.7×
-      // on int16). Pushes quiet bedroom audio into YAMNet's trained
-      // SNR range so a quiet snore scores in the 0.2–0.5 band
-      // instead of 0.05.
+      // Pre-inference: apply _preInferenceGain and soft-clip via tanh.
+      // Sleep Talk Recorder uses 6.7× hard-clipped int16, but quiet-only
+      // signals tolerate the distortion because they rarely reach the
+      // ceiling. Our clips include loud snores / alarms / coughs too,
+      // so hard-clipping distorts them. tanh preserves shape for
+      // loud signals (approaching ±1) while leaving quiet signals
+      // near-linear (tanh(0.25) ≈ 0.245).
       //
-      // Post-inference: zero out deny-list indices (Silence, Humming,
-      // Sine wave, Static, Mains hum, White/Pink noise) so they
-      // can't contaminate the downstream per-category collapse.
+      // Post-inference: zero out deny-list indices so they can't
+      // contaminate the downstream per-category collapse.
       var inferCount = 0;
       for (final off in inferOffsets) {
         final frameStart = bandStart + off;
@@ -257,8 +270,12 @@ class ClassifierService {
         final avail =
             math.min(_frame, samples.length - frameStart);
         for (var j = 0; j < avail; j++) {
+          // tanh soft clip after gain
           final v = samples[frameStart + j] * _preInferenceGain;
-          frame[j] = v > 1.0 ? 1.0 : (v < -1.0 ? -1.0 : v);
+          // math.tanh equivalent via exp — avoids importing dart:math
+          // `tanh` indirection. tanh(x) = (e^x - e^-x) / (e^x + e^-x).
+          final e2x = math.exp(2 * v);
+          frame[j] = (e2x - 1) / (e2x + 1);
         }
         try {
           interp.runForMultipleInputs(
