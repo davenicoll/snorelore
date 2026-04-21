@@ -1,10 +1,31 @@
 import 'package:flutter/material.dart';
 import 'theme.dart';
 
-/// Simplified sound categories that SnoreLore cares about.
-/// YAMNet's 521 raw labels get collapsed into these.
+/// Simplified sound categories. In v0.14.1 we collapsed down to six
+/// product categories that map 1:1 with [DisplayCategory] — Sleep Talk
+/// Recorder's simple 4-category taxonomy informed this, but we keep
+/// pets and music split because the UX calls for them.
+///
+/// Classifier outputs are limited to these values. Legacy values
+/// (speech, cough, cat, …) are retained so recordings classified in
+/// earlier versions still decode and render correctly, but new
+/// classifications never produce them.
 enum SoundCategory {
+  // Active categories produced by the classifier.
+  talking,
   snoring,
+  events,
+  pets,
+  music,
+
+  // Meta / gating.
+  silence, // amplitude gate result
+  unknown, // no category crossed threshold
+
+  // --- Legacy values (pre-v0.14.1) ---------------------------------------
+  // Kept so that already-stored recordings decode correctly. Each folds
+  // into one of the active categories via [displayCategoryOf]. New
+  // classifications never produce these.
   breathing,
   cough,
   sneeze,
@@ -24,19 +45,11 @@ enum SoundCategory {
   dog,
   traffic,
   weather,
-  music,
   walking,
   movementBed,
-  // Audibly nothing there — assigned when the segment's peak amplitude is
-  // below the silence floor regardless of what YAMNet returns.
-  silence,
-  // Deprecated buckets retained for backward compatibility with recordings
-  // that were classified before the taxonomy split. New classifications
-  // never produce these.
   animal,
   alarm,
   movement,
-  unknown,
 }
 
 class CategoryInfo {
@@ -46,49 +59,83 @@ class CategoryInfo {
   const CategoryInfo(this.label, this.icon, this.color);
 }
 
+/// Per-category display metadata. Active categories use their own info;
+/// legacy categories render with the info of the active category they
+/// fold into (so a legacy `cat` recording shows under Pets).
 const Map<SoundCategory, CategoryInfo> categoryInfo = {
-  SoundCategory.snoring: CategoryInfo('Snoring', Icons.bedtime, AppColors.primary),
-  SoundCategory.breathing: CategoryInfo('Breathing', Icons.air, AppColors.teal),
-  SoundCategory.cough: CategoryInfo('Coughing', Icons.sick, AppColors.orange),
-  SoundCategory.sneeze: CategoryInfo('Sneezing', Icons.masks, AppColors.orange),
-  SoundCategory.passion: CategoryInfo('Passion', Icons.favorite, AppColors.pink),
-  SoundCategory.fart: CategoryInfo('Fart', Icons.cloud, AppColors.teal),
-  SoundCategory.speech: CategoryInfo('Speech', Icons.record_voice_over, AppColors.accent),
-  SoundCategory.whisper: CategoryInfo('Whisper', Icons.hearing, AppColors.accent),
-  SoundCategory.scream: CategoryInfo('Scream', Icons.priority_high, AppColors.red),
-  SoundCategory.laugh: CategoryInfo('Laugh', Icons.mood, AppColors.pink),
-  SoundCategory.cry: CategoryInfo('Cry', Icons.water_drop, AppColors.teal),
-  SoundCategory.alarmClock: CategoryInfo('Alarm clock', Icons.alarm, AppColors.red),
-  SoundCategory.alarmHousehold: CategoryInfo('Smoke alarm', Icons.warning_amber, AppColors.orange),
-  SoundCategory.siren: CategoryInfo('Siren', Icons.emergency, AppColors.red),
-  SoundCategory.phone: CategoryInfo('Phone', Icons.phone_android, AppColors.pink),
-  SoundCategory.doorbell: CategoryInfo('Doorbell', Icons.doorbell, AppColors.orange),
-  SoundCategory.cat: CategoryInfo('Cat', Icons.pets, AppColors.teal),
-  SoundCategory.dog: CategoryInfo('Dog', Icons.pets, AppColors.primary),
-  SoundCategory.traffic: CategoryInfo('Traffic', Icons.directions_car, AppColors.textMuted),
-  SoundCategory.weather: CategoryInfo('Weather', Icons.cloud_queue, AppColors.textMuted),
-  SoundCategory.music: CategoryInfo('Music', Icons.music_note, AppColors.accent),
-  SoundCategory.walking: CategoryInfo('Footsteps', Icons.directions_walk, AppColors.textMuted),
-  SoundCategory.movementBed: CategoryInfo('Bedding', Icons.hotel, AppColors.textMuted),
-  SoundCategory.silence: CategoryInfo('Silence', Icons.volume_off, AppColors.textMuted),
-  // Legacy — render sensibly for old records that haven't been re-analyzed.
-  SoundCategory.animal: CategoryInfo('Pet', Icons.pets, AppColors.teal),
-  SoundCategory.alarm: CategoryInfo('Alarm', Icons.notifications_active, AppColors.red),
-  SoundCategory.movement: CategoryInfo('Movement', Icons.waves, AppColors.textMuted),
-  SoundCategory.unknown: CategoryInfo('Other', Icons.graphic_eq, AppColors.textMuted),
+  SoundCategory.talking:
+      CategoryInfo('Talking', Icons.record_voice_over, AppColors.accent),
+  SoundCategory.snoring:
+      CategoryInfo('Snoring', Icons.bedtime, AppColors.primary),
+  SoundCategory.events:
+      CategoryInfo('Events', Icons.flash_on, AppColors.orange),
+  SoundCategory.pets: CategoryInfo('Pets', Icons.pets, AppColors.amber),
+  SoundCategory.music: CategoryInfo('Music', Icons.music_note, AppColors.cyan),
+  SoundCategory.silence:
+      CategoryInfo('Silence', Icons.volume_off, AppColors.textMuted),
+  SoundCategory.unknown:
+      CategoryInfo('Other', Icons.graphic_eq, AppColors.textMuted),
+
+  // Legacy — use the display label of the folded-into active category.
+  SoundCategory.speech:
+      CategoryInfo('Talking', Icons.record_voice_over, AppColors.accent),
+  SoundCategory.whisper:
+      CategoryInfo('Talking', Icons.hearing, AppColors.accent),
+  SoundCategory.cough:
+      CategoryInfo('Events', Icons.sick, AppColors.orange),
+  SoundCategory.sneeze:
+      CategoryInfo('Events', Icons.masks, AppColors.orange),
+  SoundCategory.fart: CategoryInfo('Events', Icons.cloud, AppColors.orange),
+  SoundCategory.passion:
+      CategoryInfo('Events', Icons.favorite, AppColors.orange),
+  SoundCategory.laugh: CategoryInfo('Events', Icons.mood, AppColors.orange),
+  SoundCategory.cry:
+      CategoryInfo('Events', Icons.water_drop, AppColors.orange),
+  SoundCategory.scream:
+      CategoryInfo('Events', Icons.priority_high, AppColors.orange),
+  SoundCategory.alarmClock:
+      CategoryInfo('Events', Icons.alarm, AppColors.orange),
+  SoundCategory.alarmHousehold:
+      CategoryInfo('Events', Icons.warning_amber, AppColors.orange),
+  SoundCategory.siren:
+      CategoryInfo('Events', Icons.emergency, AppColors.orange),
+  SoundCategory.phone:
+      CategoryInfo('Events', Icons.phone_android, AppColors.orange),
+  SoundCategory.doorbell:
+      CategoryInfo('Events', Icons.doorbell, AppColors.orange),
+  SoundCategory.cat: CategoryInfo('Pets', Icons.pets, AppColors.amber),
+  SoundCategory.dog: CategoryInfo('Pets', Icons.pets, AppColors.amber),
+  SoundCategory.animal: CategoryInfo('Pets', Icons.pets, AppColors.amber),
+  SoundCategory.alarm:
+      CategoryInfo('Events', Icons.notifications_active, AppColors.orange),
+  SoundCategory.breathing:
+      CategoryInfo('Other', Icons.air, AppColors.textMuted),
+  SoundCategory.traffic:
+      CategoryInfo('Other', Icons.directions_car, AppColors.textMuted),
+  SoundCategory.weather:
+      CategoryInfo('Other', Icons.cloud_queue, AppColors.textMuted),
+  SoundCategory.walking:
+      CategoryInfo('Other', Icons.directions_walk, AppColors.textMuted),
+  SoundCategory.movementBed:
+      CategoryInfo('Other', Icons.hotel, AppColors.textMuted),
+  SoundCategory.movement:
+      CategoryInfo('Other', Icons.waves, AppColors.textMuted),
 };
 
-/// Map a YAMNet display name (from class map) to one of our simplified categories.
+/// Map a YAMNet display name to one of the six active categories.
 ///
-/// YAMNet returns 521 raw labels (see assets/models/yamnet_class_map.csv).
-/// Order matters — the first matching rule wins.
+/// Ordering matters — the first matching rule wins. Farm/wild animal /
+/// bird labels and the generic Animal/Domestic-animals parents are
+/// excluded because a bedroom classifier shouldn't emit them; they
+/// fall through to unknown.
+///
+/// Breathing-family labels (Breathing / Gasp / Pant / Sigh / Sniff)
+/// are already denied at inference time so they never reach this
+/// mapping.
 SoundCategory mapYamnetLabel(String name) {
   final n = name.toLowerCase().trim();
 
-  // --- Farm/wild animals / birds: not plausible in a bedroom, so we file
-  //     these under Other rather than letting them leak into the Pet bucket
-  //     and dilute real cat/dog signals. This also prevents "Cattle" from
-  //     substring-matching "cat".
+  // Exclude farm / wild / bird labels — never produced for bedroom audio.
   if (n == 'cattle, bovinae' ||
       n == 'moo' ||
       n == 'pig' ||
@@ -114,10 +161,8 @@ SoundCategory mapYamnetLabel(String name) {
     return SoundCategory.unknown;
   }
 
-  // --- Human sleep sounds ---------------------------------------------------
-
-  // Snoring — plus YAMNet's Grunt / Snort / Growling labels which in a
-  // bedroom are near-always actually snoring rather than effort/dog noises.
+  // Snoring-family: YAMNet's Grunt / Snort / Growling all read as snores
+  // in an overnight bedroom recording.
   if (n.contains('snor') ||
       n == 'grunt' ||
       n == 'snort' ||
@@ -125,43 +170,69 @@ SoundCategory mapYamnetLabel(String name) {
     return SoundCategory.snoring;
   }
 
-  // Moaning / groaning — intimate vocalisations.
-  if (n.contains('moan') || n.contains('groan')) return SoundCategory.passion;
-
-  if (n.contains('sneez')) return SoundCategory.sneeze;
-
-  if (n.contains('cough') || n.contains('throat')) return SoundCategory.cough;
-
+  // Events: short/loud/transient sounds. One broad bucket so YAMNet's
+  // close-scoring neighbours (sneeze/cough, cry/scream, alarm variants)
+  // can't fight each other for the argmax.
+  if (n.contains('sneez') ||
+      n.contains('cough') ||
+      n.contains('throat')) {
+    return SoundCategory.events;
+  }
   if (n == 'fart' ||
       n.contains('burping') ||
       n.contains('eructation') ||
       n == 'hiccup') {
-    return SoundCategory.fart;
+    return SoundCategory.events;
   }
-
   if (n.contains('laugh') ||
       n.contains('giggl') ||
       n.contains('chuckl') ||
       n.contains('chortl')) {
-    return SoundCategory.laugh;
+    return SoundCategory.events;
   }
-
   if (n.contains('screaming') ||
       n == 'shout' ||
       n == 'yell' ||
       n.contains('children shouting')) {
-    return SoundCategory.scream;
+    return SoundCategory.events;
   }
-
   if (n.contains('cry') ||
       n.contains('sob') ||
       n.contains('wail') ||
       n == 'whimper') {
-    return SoundCategory.cry;
+    return SoundCategory.events;
+  }
+  if (n.contains('moan') || n.contains('groan')) {
+    return SoundCategory.events;
+  }
+  if (n.contains('alarm') ||
+      n.contains('buzzer') ||
+      n.contains('beep, bleep') ||
+      n == 'beep' ||
+      n == 'reversing beeps' ||
+      n.contains('smoke detector') ||
+      n.contains('smoke alarm') ||
+      n.contains('fire alarm') ||
+      n.contains('civil defense') ||
+      n.contains('police car') ||
+      n.contains('ambulance') ||
+      n.contains('fire engine') ||
+      n.contains('fire truck') ||
+      n.contains('emergency vehicle') ||
+      n == 'siren') {
+    return SoundCategory.events;
+  }
+  if (n.contains('telephone') ||
+      n.contains('ringtone') ||
+      n.contains('phone')) {
+    return SoundCategory.events;
+  }
+  if (n.contains('doorbell') || n.contains('knock')) {
+    return SoundCategory.events;
   }
 
-  if (n.contains('whisper')) return SoundCategory.whisper;
-
+  // Talking: conversational speech including whispering.
+  if (n.contains('whisper')) return SoundCategory.talking;
   if (n == 'speech' ||
       n.contains('child speech') ||
       n.contains('kid speaking') ||
@@ -169,52 +240,16 @@ SoundCategory mapYamnetLabel(String name) {
       n.contains('narration') ||
       n.contains('babbl') ||
       n.contains('monolog')) {
-    return SoundCategory.speech;
+    return SoundCategory.talking;
   }
 
-  // --- Alarms (specific before generic) -------------------------------------
-  if (n.contains('alarm clock')) return SoundCategory.alarmClock;
-  if (n.contains('smoke detector') ||
-      n.contains('smoke alarm') ||
-      n.contains('fire alarm') ||
-      n.contains('civil defense')) {
-    return SoundCategory.alarmHousehold;
-  }
-  if (n.contains('police car') ||
-      n.contains('ambulance') ||
-      n.contains('fire engine') ||
-      n.contains('fire truck') ||
-      n.contains('emergency vehicle') ||
-      n == 'siren') {
-    return SoundCategory.siren;
-  }
-  // Generic alarm / beep / buzzer — treat as clock alarm since in a bedroom
-  // that's overwhelmingly the source.
-  if (n == 'alarm' ||
-      n.contains('buzzer') ||
-      n.contains('beep, bleep') ||
-      n == 'beep' ||
-      n == 'reversing beeps') {
-    return SoundCategory.alarmClock;
-  }
-
-  // --- Communication devices ------------------------------------------------
-  if (n.contains('telephone') ||
-      n.contains('ringtone') ||
-      n.contains('phone')) {
-    return SoundCategory.phone;
-  }
-  if (n.contains('doorbell') || n.contains('knock')) {
-    return SoundCategory.doorbell;
-  }
-
-  // --- Cat / Dog ------------------------------------------------------------
+  // Pets: cat and dog variants.
   if (n == 'cat' ||
       n == 'purr' ||
       n == 'meow' ||
       n == 'hiss' ||
       n == 'caterwaul') {
-    return SoundCategory.cat;
+    return SoundCategory.pets;
   }
   if (n == 'dog' ||
       n == 'bark' ||
@@ -223,23 +258,15 @@ SoundCategory mapYamnetLabel(String name) {
       n.contains('canidae') ||
       n == 'bow-wow' ||
       n == 'yip') {
-    return SoundCategory.dog;
+    return SoundCategory.pets;
   }
-  // Generic "Animal" / "Domestic animals, pets" don't commit to either —
-  // leave as unknown so a more specific label wins when it also fires.
+  // Generic "Animal" / "Domestic animals, pets" umbrellas — ambiguous,
+  // file as unknown so a more specific child label wins when it fires.
   if (n == 'animal' || n == 'domestic animals, pets') {
     return SoundCategory.unknown;
   }
 
-  // --- Breathing ------------------------------------------------------------
-  if (n.contains('breath') ||
-      n.contains('gasp') ||
-      n.contains('pant') ||
-      n.contains('sigh')) {
-    return SoundCategory.breathing;
-  }
-
-  // --- Music ----------------------------------------------------------------
+  // Music.
   if (n.contains('music') ||
       n.contains('song') ||
       n.contains('singing') ||
@@ -248,133 +275,75 @@ SoundCategory mapYamnetLabel(String name) {
     return SoundCategory.music;
   }
 
-  // --- Traffic --------------------------------------------------------------
-  if (n.contains('traffic') ||
-      n.contains('motor vehicle') ||
-      n == 'car' ||
-      n.contains('car passing') ||
-      n.contains('truck') ||
-      n.contains('motorcycle') ||
-      n == 'vehicle' ||
-      n.contains('vehicle horn') ||
-      n.contains('car horn') ||
-      n.contains('honking') ||
-      n.contains('car alarm') ||
-      n.contains('race car') ||
-      n == 'train' ||
-      n.contains('train whistle') ||
-      n.contains('train horn') ||
-      n.contains('train wheels') ||
-      n.contains('railroad car') ||
-      n.contains('air horn') ||
-      n.contains('aircraft') ||
-      n.contains('jet engine')) {
-    return SoundCategory.traffic;
-  }
-
-  // --- Weather --------------------------------------------------------------
-  if (n.contains('thunder') ||
-      n == 'rain' ||
-      n.contains('raindrop') ||
-      n.contains('rain on surface') ||
-      n == 'wind' ||
-      n.contains('wind noise')) {
-    return SoundCategory.weather;
-  }
-
-  // --- Movement -------------------------------------------------------------
-  if (n.contains('walk, footsteps') ||
-      n.contains('footstep') ||
-      n == 'run' ||
-      n == 'jogging') {
-    return SoundCategory.walking;
-  }
-  if (n == 'rustle' ||
-      n.contains('zipper') ||
-      n.contains('sliding door') ||
-      n == 'door' ||
-      n.contains('cupboard open') ||
-      n.contains('drawer open') ||
-      n.contains('cloth') ||
-      n.contains('creak') ||
-      n.contains('squeak') ||
-      n.contains('thump') ||
-      n.contains('rumbl') ||
-      n.contains('bed')) {
-    return SoundCategory.movementBed;
-  }
-
+  // Everything else — traffic, weather, movement, rustle, breathing
+  // (already denied), etc. — is "unknown" rather than a specific
+  // category. The v0.13.1 denylist already strips the noisy attractors.
   return SoundCategory.unknown;
 }
 
-/// Bedroom/sleep prior. Multiplies YAMNet's raw category scores when
-/// picking the primary category and per-band argmax. Narrowed in v0.13.1
-/// from a 0.5–1.5 range to 0.7–1.3 — with the v0.13.0 5× gain boost,
-/// absolute score differences are larger, so the old range was tipping
-/// decisions too aggressively.
+/// Bedroom/sleep prior for the collapsed taxonomy. Gentler than the
+/// pre-v0.13.1 0.5–1.5 range because the 5× gain boost (v0.13.0) makes
+/// absolute score differences larger.
 const Map<SoundCategory, double> categoryPrior = {
-  // Expected sleep sounds — mild boost only.
   SoundCategory.snoring: 1.3,
-  SoundCategory.breathing: 1.2, // denied at YAMNet level, prior unused
-  SoundCategory.movementBed: 1.1,
+  SoundCategory.talking: 1.0, // over-fires on ambient, keep neutral
+  SoundCategory.events: 1.0,
+  SoundCategory.pets: 0.9, // plausible but don't steal primary from snoring
+  SoundCategory.music: 0.75, // external, suppressed
+  SoundCategory.silence: 1.0,
+  SoundCategory.unknown: 1.0,
+  // Legacy — unused by new classifier, but keep map total so ??1.0
+  // fallback stays consistent.
   SoundCategory.speech: 1.0,
-  SoundCategory.whisper: 1.1,
-
-  // Semi-common
-  SoundCategory.cough: 1.05,
-  SoundCategory.sneeze: 1.05,
+  SoundCategory.whisper: 1.0,
+  SoundCategory.breathing: 1.0,
+  SoundCategory.cough: 1.0,
+  SoundCategory.sneeze: 1.0,
+  SoundCategory.fart: 1.0,
   SoundCategory.passion: 1.0,
   SoundCategory.laugh: 1.0,
   SoundCategory.cry: 1.0,
-  SoundCategory.fart: 1.0,
-  SoundCategory.walking: 1.0,
-
-  // Pets — present in some bedrooms, muted but not suppressed.
+  SoundCategory.scream: 1.0,
+  SoundCategory.alarmClock: 1.0,
+  SoundCategory.alarmHousehold: 1.0,
+  SoundCategory.siren: 1.0,
+  SoundCategory.phone: 1.0,
+  SoundCategory.doorbell: 1.0,
   SoundCategory.cat: 0.9,
   SoundCategory.dog: 0.9,
-
-  // Household alarms — rare but meaningful when they fire.
-  SoundCategory.alarmClock: 1.0,
-  SoundCategory.alarmHousehold: 0.95,
-  SoundCategory.phone: 0.85,
-  SoundCategory.doorbell: 0.85,
-  SoundCategory.siren: 0.75,
-
-  // External background — suppressed to 0.75 (was 0.5). With post-gain
-  // scores, even the milder suppression is still meaningful.
-  SoundCategory.traffic: 0.75,
-  SoundCategory.weather: 0.75,
-  SoundCategory.music: 0.75,
-  SoundCategory.scream: 0.75,
-
-  // Legacy buckets
+  SoundCategory.traffic: 1.0,
+  SoundCategory.weather: 1.0,
+  SoundCategory.walking: 1.0,
+  SoundCategory.movementBed: 1.0,
   SoundCategory.animal: 0.9,
   SoundCategory.alarm: 1.0,
   SoundCategory.movement: 1.0,
-  SoundCategory.silence: 1.0,
-  SoundCategory.unknown: 1.0,
 };
 
-/// How the classifier aggregates a category's score across the multiple
-/// YAMNet inferences in one segment (and across the segments of a clip).
-///
-/// MAX: a single strong hit commits the category. Right for short, rare
-///   events — sneeze, cough, fart, alarm, siren, doorbell — where one
-///   frame of high confidence is all the evidence you get.
-/// MEAN: averaged across frames. Right for sustained sounds — snoring,
-///   breathing, speech, traffic — where a single noisy 0.9 frame shouldn't
-///   tag the whole segment if the other 9 frames are 0.05.
+/// Per-category aggregation mode across YAMNet inferences.
+///   MAX: single strong hit commits (events)
+///   MEAN: averaged across frames (sustained)
 enum CategoryAggregation { max, mean }
 
 const Map<SoundCategory, CategoryAggregation> categoryAggregation = {
-  // Events / transients
-  SoundCategory.sneeze: CategoryAggregation.max,
+  SoundCategory.snoring: CategoryAggregation.mean,
+  SoundCategory.talking: CategoryAggregation.mean,
+  SoundCategory.events: CategoryAggregation.max,
+  SoundCategory.pets: CategoryAggregation.max,
+  SoundCategory.music: CategoryAggregation.mean,
+  SoundCategory.silence: CategoryAggregation.mean,
+  SoundCategory.unknown: CategoryAggregation.max,
+  // Legacy fallback
+  SoundCategory.speech: CategoryAggregation.mean,
+  SoundCategory.whisper: CategoryAggregation.mean,
+  SoundCategory.breathing: CategoryAggregation.mean,
   SoundCategory.cough: CategoryAggregation.max,
+  SoundCategory.sneeze: CategoryAggregation.max,
   SoundCategory.fart: CategoryAggregation.max,
-  SoundCategory.scream: CategoryAggregation.max,
+  SoundCategory.passion: CategoryAggregation.max,
   SoundCategory.laugh: CategoryAggregation.max,
   SoundCategory.cry: CategoryAggregation.max,
-  SoundCategory.passion: CategoryAggregation.max,
+  SoundCategory.scream: CategoryAggregation.max,
   SoundCategory.alarmClock: CategoryAggregation.max,
   SoundCategory.alarmHousehold: CategoryAggregation.max,
   SoundCategory.siren: CategoryAggregation.max,
@@ -382,36 +351,27 @@ const Map<SoundCategory, CategoryAggregation> categoryAggregation = {
   SoundCategory.doorbell: CategoryAggregation.max,
   SoundCategory.cat: CategoryAggregation.max,
   SoundCategory.dog: CategoryAggregation.max,
-  SoundCategory.walking: CategoryAggregation.max,
-  // Sustained
-  SoundCategory.snoring: CategoryAggregation.mean,
-  SoundCategory.breathing: CategoryAggregation.mean,
-  SoundCategory.speech: CategoryAggregation.mean,
-  SoundCategory.whisper: CategoryAggregation.mean,
   SoundCategory.traffic: CategoryAggregation.mean,
   SoundCategory.weather: CategoryAggregation.mean,
-  SoundCategory.music: CategoryAggregation.mean,
+  SoundCategory.walking: CategoryAggregation.max,
   SoundCategory.movementBed: CategoryAggregation.mean,
-  // Legacy / meta
   SoundCategory.animal: CategoryAggregation.max,
   SoundCategory.alarm: CategoryAggregation.max,
   SoundCategory.movement: CategoryAggregation.mean,
-  SoundCategory.silence: CategoryAggregation.mean,
-  SoundCategory.unknown: CategoryAggregation.max,
 };
 
 /// Categories that represent short, acute events. The waveform smoother
-/// never smooths one of these away: even a single 10 s segment of "Sneeze"
-/// is informative and almost certainly genuine. Smoothing targets the
-/// steady-state categories, where a lone outlier segment in the middle of
-/// a long run is the common YAMNet mis-label.
+/// never rewrites them, so a genuine 1-band event stays visible.
 const Set<SoundCategory> eventCategories = {
-  SoundCategory.sneeze,
+  SoundCategory.events,
+  SoundCategory.pets, // bark / meow are punctate
+  // Legacy fallback
   SoundCategory.cough,
+  SoundCategory.sneeze,
   SoundCategory.fart,
-  SoundCategory.scream,
   SoundCategory.laugh,
   SoundCategory.cry,
+  SoundCategory.scream,
   SoundCategory.passion,
   SoundCategory.alarmClock,
   SoundCategory.alarmHousehold,
@@ -420,23 +380,90 @@ const Set<SoundCategory> eventCategories = {
   SoundCategory.doorbell,
 };
 
+/// Per-category commit threshold for the per-band argmax. Calibrated
+/// for v0.13.0's 5× gain boost — typical post-gain scores land in
+/// 0.25–0.5 for confident classifications.
+const Map<SoundCategory, double> categoryCommitThreshold = {
+  SoundCategory.snoring: 0.15,
+  SoundCategory.talking: 0.25,
+  SoundCategory.events: 0.25,
+  SoundCategory.pets: 0.25,
+  SoundCategory.music: 0.25,
+  SoundCategory.silence: 1.0, // never committed via argmax
+  SoundCategory.unknown: 1.0,
+  // Legacy fallback thresholds (no new classification produces these).
+  SoundCategory.speech: 0.25,
+  SoundCategory.whisper: 0.15,
+  SoundCategory.breathing: 0.10,
+  SoundCategory.cough: 0.25,
+  SoundCategory.sneeze: 0.30,
+  SoundCategory.fart: 0.30,
+  SoundCategory.passion: 0.25,
+  SoundCategory.laugh: 0.25,
+  SoundCategory.cry: 0.25,
+  SoundCategory.scream: 0.30,
+  SoundCategory.alarmClock: 0.30,
+  SoundCategory.alarmHousehold: 0.35,
+  SoundCategory.siren: 0.35,
+  SoundCategory.phone: 0.30,
+  SoundCategory.doorbell: 0.30,
+  SoundCategory.cat: 0.25,
+  SoundCategory.dog: 0.25,
+  SoundCategory.traffic: 0.20,
+  SoundCategory.weather: 0.25,
+  SoundCategory.walking: 0.20,
+  SoundCategory.movementBed: 0.15,
+  SoundCategory.animal: 0.25,
+  SoundCategory.alarm: 0.30,
+  SoundCategory.movement: 0.15,
+};
+
+/// Per-category median-filter length (in bands) applied to the per-band
+/// score time series. Events use length 1 (no smoothing — a 1-band
+/// event must survive); sustained categories use longer windows.
+const Map<SoundCategory, int> categoryMedianLen = {
+  SoundCategory.snoring: 5,
+  SoundCategory.talking: 1, // DCASE uses 1 for Speech
+  SoundCategory.events: 1, // punctate — never smooth
+  SoundCategory.pets: 3,
+  SoundCategory.music: 5,
+  SoundCategory.silence: 1,
+  SoundCategory.unknown: 1,
+  // Legacy fallback (unused by new classifier)
+  SoundCategory.speech: 1,
+  SoundCategory.whisper: 1,
+  SoundCategory.breathing: 5,
+  SoundCategory.cough: 1,
+  SoundCategory.sneeze: 1,
+  SoundCategory.fart: 1,
+  SoundCategory.passion: 3,
+  SoundCategory.laugh: 1,
+  SoundCategory.cry: 3,
+  SoundCategory.scream: 1,
+  SoundCategory.alarmClock: 1,
+  SoundCategory.alarmHousehold: 1,
+  SoundCategory.siren: 3,
+  SoundCategory.phone: 1,
+  SoundCategory.doorbell: 1,
+  SoundCategory.cat: 3,
+  SoundCategory.dog: 3,
+  SoundCategory.traffic: 5,
+  SoundCategory.weather: 5,
+  SoundCategory.walking: 3,
+  SoundCategory.movementBed: 3,
+  SoundCategory.animal: 3,
+  SoundCategory.alarm: 1,
+  SoundCategory.movement: 3,
+};
+
 // ---------------------------------------------------------------------------
-// Display-level grouping
-//
-// The Night Detail screen shows recordings grouped under nine collapsible
-// sections. The granular [SoundCategory] set we classify with is richer
-// than the user needs in that view, so we map it down to a small list of
-// display buckets. Order of [DisplayCategory.values] is the order the
-// sections appear; skip any bucket with zero recordings.
+// Display-level grouping — 1:1 with the collapsed SoundCategory set.
 // ---------------------------------------------------------------------------
 
 enum DisplayCategory {
   talking,
   snoring,
-  farting,
-  coughing,
-  emotions,
-  warning,
+  events,
   pets,
   music,
   other,
@@ -450,64 +477,68 @@ class DisplayCategoryInfo {
 }
 
 const Map<DisplayCategory, DisplayCategoryInfo> displayCategoryInfo = {
-  DisplayCategory.talking: DisplayCategoryInfo('Talking', Icons.record_voice_over, AppColors.accent),
-  DisplayCategory.snoring: DisplayCategoryInfo('Snoring', Icons.bedtime, AppColors.primary),
-  DisplayCategory.farting: DisplayCategoryInfo('Farting', Icons.cloud, AppColors.teal),
-  DisplayCategory.coughing: DisplayCategoryInfo('Coughing', Icons.sick, AppColors.orange),
-  DisplayCategory.emotions: DisplayCategoryInfo('Emotions', Icons.mood, AppColors.pink),
-  DisplayCategory.warning: DisplayCategoryInfo('Warning', Icons.warning_amber, AppColors.red),
-  DisplayCategory.pets: DisplayCategoryInfo('Pets', Icons.pets, AppColors.amber),
-  DisplayCategory.music: DisplayCategoryInfo('Music', Icons.music_note, AppColors.cyan),
-  DisplayCategory.other: DisplayCategoryInfo('Other', Icons.graphic_eq, AppColors.textMuted),
+  DisplayCategory.talking: DisplayCategoryInfo(
+      'Talking', Icons.record_voice_over, AppColors.accent),
+  DisplayCategory.snoring:
+      DisplayCategoryInfo('Snoring', Icons.bedtime, AppColors.primary),
+  DisplayCategory.events:
+      DisplayCategoryInfo('Events', Icons.flash_on, AppColors.orange),
+  DisplayCategory.pets:
+      DisplayCategoryInfo('Pets', Icons.pets, AppColors.amber),
+  DisplayCategory.music:
+      DisplayCategoryInfo('Music', Icons.music_note, AppColors.cyan),
+  DisplayCategory.other:
+      DisplayCategoryInfo('Other', Icons.graphic_eq, AppColors.textMuted),
 };
 
-/// Fold a granular [SoundCategory] into one of the nine display buckets.
+/// Fold a [SoundCategory] into a display bucket. For active categories
+/// this is near-identity; legacy categories fold to the bucket they
+/// match semantically.
 DisplayCategory displayCategoryOf(SoundCategory c) {
   switch (c) {
+    case SoundCategory.talking:
     case SoundCategory.speech:
     case SoundCategory.whisper:
       return DisplayCategory.talking;
     case SoundCategory.snoring:
       return DisplayCategory.snoring;
-    case SoundCategory.fart:
-      return DisplayCategory.farting;
+    case SoundCategory.events:
     case SoundCategory.cough:
     case SoundCategory.sneeze:
-      return DisplayCategory.coughing;
-    case SoundCategory.cry:
+    case SoundCategory.fart:
     case SoundCategory.laugh:
+    case SoundCategory.cry:
     case SoundCategory.scream:
     case SoundCategory.passion:
-      return DisplayCategory.emotions;
     case SoundCategory.alarmClock:
     case SoundCategory.alarmHousehold:
     case SoundCategory.siren:
     case SoundCategory.phone:
     case SoundCategory.doorbell:
     case SoundCategory.alarm:
-      return DisplayCategory.warning;
+      return DisplayCategory.events;
+    case SoundCategory.pets:
     case SoundCategory.cat:
     case SoundCategory.dog:
     case SoundCategory.animal:
       return DisplayCategory.pets;
     case SoundCategory.music:
       return DisplayCategory.music;
+    case SoundCategory.silence:
+    case SoundCategory.unknown:
     case SoundCategory.breathing:
     case SoundCategory.traffic:
     case SoundCategory.weather:
-    case SoundCategory.movementBed:
     case SoundCategory.walking:
-    case SoundCategory.silence:
+    case SoundCategory.movementBed:
     case SoundCategory.movement:
-    case SoundCategory.unknown:
       return DisplayCategory.other;
   }
 }
 
-/// The set of display buckets a recording belongs to — the primary plus
-/// any tag plus any per-segment category. That way a clip whose primary is
-/// Snoring but which contains a real sneeze window shows up under both
-/// Snoring and Coughing.
+/// Set of display buckets a recording belongs to — the primary plus
+/// any tag plus any per-segment category. A clip whose primary is
+/// Snoring but contains a real events window shows up under both.
 Set<DisplayCategory> displayCategoriesFor(
     SoundCategory primary,
     List<SoundCategory> tags,
@@ -522,89 +553,3 @@ Set<DisplayCategory> displayCategoriesFor(
   }
   return out;
 }
-
-/// Per-category commit threshold for the per-band argmax. YAMNet's raw
-/// softmax scores are NOT comparable across classes (confirmed in its
-/// own README), so a single flat 0.10 floor was systematically wrong:
-/// Snoring often scores 0.06–0.15 on quiet bedroom audio, while events
-/// like Sneeze score 0.3–0.6 when they fire. Per-category thresholds are
-/// the DCASE 2024 Task 4 baseline approach — its YAML ships 27
-/// class-specific thresholds. Numbers below are informed by that
-/// baseline + anecdotal bedroom YAMNet score distributions.
-const Map<SoundCategory, double> categoryCommitThreshold = {
-  // Calibrated for the v0.13.0 5× gain boost. Typical post-gain scores
-  // for confident classifications land in 0.25–0.5; pre-gain
-  // thresholds (0.05–0.15) were swamped by post-gain noise floors.
-  // Sustained
-  SoundCategory.snoring: 0.15,
-  SoundCategory.breathing: 0.10, // denied at YAMNet level, unused
-  SoundCategory.speech: 0.25,
-  SoundCategory.whisper: 0.15,
-  SoundCategory.traffic: 0.20,
-  SoundCategory.weather: 0.25,
-  SoundCategory.music: 0.25,
-  SoundCategory.movementBed: 0.15,
-  // Events — need a cleaner peak to avoid false positives.
-  SoundCategory.sneeze: 0.30,
-  SoundCategory.cough: 0.25,
-  SoundCategory.fart: 0.30,
-  SoundCategory.laugh: 0.25,
-  SoundCategory.cry: 0.25,
-  SoundCategory.scream: 0.30,
-  SoundCategory.passion: 0.25,
-  SoundCategory.alarmClock: 0.30,
-  SoundCategory.alarmHousehold: 0.35,
-  SoundCategory.siren: 0.35,
-  SoundCategory.phone: 0.30,
-  SoundCategory.doorbell: 0.30,
-  SoundCategory.cat: 0.25,
-  SoundCategory.dog: 0.25,
-  SoundCategory.walking: 0.20,
-  // Legacy / meta
-  SoundCategory.animal: 0.25,
-  SoundCategory.alarm: 0.30,
-  SoundCategory.movement: 0.15,
-  SoundCategory.silence: 1.0, // never committed via argmax
-  SoundCategory.unknown: 1.0,
-};
-
-/// Per-category median-filter length (in bands) applied to the per-band
-/// score time series before argmax. DCASE 2024 Task 4 baseline ships a
-/// 27-class median-filter array with values from 1 (Speech — no
-/// smoothing) to 17 (sustained background sounds). Our bands are 1 s so
-/// these values directly translate to seconds of context.
-const Map<SoundCategory, int> categoryMedianLen = {
-  // Sustained sounds — smooth across a few seconds to suppress brief
-  // score dips without losing the run.
-  SoundCategory.snoring: 5,
-  SoundCategory.breathing: 5,
-  SoundCategory.traffic: 5,
-  SoundCategory.weather: 5,
-  SoundCategory.music: 5,
-  SoundCategory.movementBed: 3,
-  // Short vocalisations — no smoothing (DCASE uses length 1 for Speech).
-  SoundCategory.speech: 1,
-  SoundCategory.whisper: 1,
-  // Punctate events — never smooth (a 1-band event must survive).
-  SoundCategory.sneeze: 1,
-  SoundCategory.cough: 1,
-  SoundCategory.fart: 1,
-  SoundCategory.laugh: 1,
-  SoundCategory.cry: 3,
-  SoundCategory.scream: 1,
-  SoundCategory.passion: 3,
-  SoundCategory.alarmClock: 1,
-  SoundCategory.alarmHousehold: 1,
-  SoundCategory.siren: 3,
-  SoundCategory.phone: 1,
-  SoundCategory.doorbell: 1,
-  SoundCategory.cat: 3,
-  SoundCategory.dog: 3,
-  SoundCategory.walking: 3,
-  // Legacy
-  SoundCategory.animal: 3,
-  SoundCategory.alarm: 1,
-  SoundCategory.movement: 3,
-  SoundCategory.silence: 1,
-  SoundCategory.unknown: 1,
-};
