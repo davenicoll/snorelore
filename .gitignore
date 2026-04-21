@@ -46,3 +46,6 @@ app.*.map.json
 
 # Claude Code per-project state
 .claude/
+
+# Reference APKs (decompiled for study, do not commit)
+*.apk
