@@ -19,6 +19,7 @@ enum RecorderPhase { idle, listening, capturing }
 class SessionStatus {
   final RecorderPhase phase;
   final int segmentsCaptured;
+  final int discardedCaptures;
   final DateTime? sessionStartedAt;
   final DateTime? endsAt;
   final double lastAmplitudeDb;
@@ -28,6 +29,7 @@ class SessionStatus {
   const SessionStatus({
     required this.phase,
     required this.segmentsCaptured,
+    this.discardedCaptures = 0,
     required this.sessionStartedAt,
     required this.endsAt,
     required this.lastAmplitudeDb,
@@ -38,6 +40,7 @@ class SessionStatus {
   SessionStatus copyWith({
     RecorderPhase? phase,
     int? segmentsCaptured,
+    int? discardedCaptures,
     DateTime? sessionStartedAt,
     DateTime? endsAt,
     double? lastAmplitudeDb,
@@ -47,6 +50,7 @@ class SessionStatus {
       SessionStatus(
         phase: phase ?? this.phase,
         segmentsCaptured: segmentsCaptured ?? this.segmentsCaptured,
+        discardedCaptures: discardedCaptures ?? this.discardedCaptures,
         sessionStartedAt: sessionStartedAt ?? this.sessionStartedAt,
         endsAt: endsAt ?? this.endsAt,
         lastAmplitudeDb: lastAmplitudeDb ?? this.lastAmplitudeDb,
@@ -57,6 +61,7 @@ class SessionStatus {
   static const idle = SessionStatus(
     phase: RecorderPhase.idle,
     segmentsCaptured: 0,
+    discardedCaptures: 0,
     sessionStartedAt: null,
     endsAt: null,
     lastAmplitudeDb: -100,
@@ -91,6 +96,7 @@ class AudioRecorderService {
   DateTime? _sessionStartedAt;
   DateTime? _sessionEndsAt;
   int _segmentsCaptured = 0;
+  int _discardedCaptures = 0;
 
   // Pre-roll ring buffer of raw PCM bytes — sized to `preRollSeconds`.
   final Queue<Uint8List> _preRoll = Queue();
@@ -150,6 +156,7 @@ class AudioRecorderService {
     _sessionStartedAt = DateTime.now();
     _sessionEndsAt = endsAt;
     _segmentsCaptured = 0;
+    _discardedCaptures = 0;
     _running = true;
 
     _status = SessionStatus.idle.copyWith(
@@ -392,6 +399,25 @@ class AudioRecorderService {
       }
     } catch (_) {}
 
+    // Classifier-gated save. Our amplitude VAD captures any sound above
+    // threshold, which means bed movement, fan clicks, and other
+    // un-classifiable noise end up on disk. Sleep Talk Recorder solves
+    // this by making their classifier the VAD — they only record
+    // audio YAMNet was confident about. We don't do their architectural
+    // pattern yet, but we can filter post-capture: if the classifier
+    // gave up (primary=unknown, no tags), the clip has nothing YAMNet
+    // recognised, so delete the WAV and don't persist the Recording.
+    final classifiable =
+        cat != SoundCategory.unknown || tags.isNotEmpty;
+    if (!classifiable) {
+      try {
+        await File(wavPath).delete();
+      } catch (_) {}
+      _discardedCaptures++;
+      _emit();
+      return;
+    }
+
     final rec = Recording(
       id: _uuid.v4(),
       filePath: wavPath,
@@ -486,6 +512,7 @@ class AudioRecorderService {
   String _lastNotifContent = '';
 
   void _emit() {
+    _status = _status.copyWith(discardedCaptures: _discardedCaptures);
     _statusCtrl.add(_status);
     _pushNotificationState();
   }
