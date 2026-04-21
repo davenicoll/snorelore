@@ -308,51 +308,47 @@ SoundCategory mapYamnetLabel(String name) {
 }
 
 /// Bedroom/sleep prior. Multiplies YAMNet's raw category scores when
-/// picking the primary category and when colouring segments. Higher values
-/// favour categories we expect to see at night; lower values suppress
-/// implausible ones so "Purr" can't beat "Snoring" on a noisy clip.
-///
-/// These are deliberately gentle multipliers (0.5–1.5) — they nudge
-/// decisions at close margins without overriding strong YAMNet confidence.
+/// picking the primary category and per-band argmax. Narrowed in v0.13.1
+/// from a 0.5–1.5 range to 0.7–1.3 — with the v0.13.0 5× gain boost,
+/// absolute score differences are larger, so the old range was tipping
+/// decisions too aggressively.
 const Map<SoundCategory, double> categoryPrior = {
-  // Expected sleep sounds
-  SoundCategory.snoring: 1.5,
-  SoundCategory.breathing: 1.3,
-  SoundCategory.movementBed: 1.3,
-  // Speech is known to over-fire on bedroom audio (community finding on the
-  // Google AI forum / arXiv 2310.13759), so we leave it neutral.
+  // Expected sleep sounds — mild boost only.
+  SoundCategory.snoring: 1.3,
+  SoundCategory.breathing: 1.2, // denied at YAMNet level, prior unused
+  SoundCategory.movementBed: 1.1,
   SoundCategory.speech: 1.0,
-  SoundCategory.whisper: 1.2,
+  SoundCategory.whisper: 1.1,
 
   // Semi-common
-  SoundCategory.cough: 1.1,
-  SoundCategory.sneeze: 1.1,
+  SoundCategory.cough: 1.05,
+  SoundCategory.sneeze: 1.05,
   SoundCategory.passion: 1.0,
   SoundCategory.laugh: 1.0,
   SoundCategory.cry: 1.0,
   SoundCategory.fart: 1.0,
   SoundCategory.walking: 1.0,
 
-  // Household pets — expected if user has them, but shouldn't steal primary
-  // from stronger snoring signals.
+  // Pets — present in some bedrooms, muted but not suppressed.
   SoundCategory.cat: 0.9,
   SoundCategory.dog: 0.9,
 
-  // Household alarms are rare but important when they fire.
+  // Household alarms — rare but meaningful when they fire.
   SoundCategory.alarmClock: 1.0,
-  SoundCategory.alarmHousehold: 0.9,
-  SoundCategory.phone: 0.8,
-  SoundCategory.doorbell: 0.8,
-  SoundCategory.siren: 0.6,
+  SoundCategory.alarmHousehold: 0.95,
+  SoundCategory.phone: 0.85,
+  SoundCategory.doorbell: 0.85,
+  SoundCategory.siren: 0.75,
 
-  // External background — suppressed so they only win on strong confidence.
-  SoundCategory.traffic: 0.5,
-  SoundCategory.weather: 0.5,
-  SoundCategory.music: 0.5,
-  SoundCategory.scream: 0.5,
+  // External background — suppressed to 0.75 (was 0.5). With post-gain
+  // scores, even the milder suppression is still meaningful.
+  SoundCategory.traffic: 0.75,
+  SoundCategory.weather: 0.75,
+  SoundCategory.music: 0.75,
+  SoundCategory.scream: 0.75,
 
-  // Legacy buckets: leave neutral.
-  SoundCategory.animal: 1.0,
+  // Legacy buckets
+  SoundCategory.animal: 0.9,
   SoundCategory.alarm: 1.0,
   SoundCategory.movement: 1.0,
   SoundCategory.silence: 1.0,
@@ -536,36 +532,38 @@ Set<DisplayCategory> displayCategoriesFor(
 /// class-specific thresholds. Numbers below are informed by that
 /// baseline + anecdotal bedroom YAMNet score distributions.
 const Map<SoundCategory, double> categoryCommitThreshold = {
-  // Sustained: scores are often modest, so floors are low.
-  SoundCategory.snoring: 0.05,
-  SoundCategory.breathing: 0.04,
-  SoundCategory.speech: 0.08,
-  SoundCategory.whisper: 0.06,
-  SoundCategory.traffic: 0.08,
-  SoundCategory.weather: 0.10,
-  SoundCategory.music: 0.10,
-  SoundCategory.movementBed: 0.08,
-  // Events: one strong frame is the signal, so floors are higher to
-  // avoid committing on YAMNet noise.
-  SoundCategory.sneeze: 0.15,
-  SoundCategory.cough: 0.12,
-  SoundCategory.fart: 0.15,
-  SoundCategory.laugh: 0.12,
-  SoundCategory.cry: 0.12,
-  SoundCategory.scream: 0.15,
-  SoundCategory.passion: 0.12,
-  SoundCategory.alarmClock: 0.12,
-  SoundCategory.alarmHousehold: 0.15,
-  SoundCategory.siren: 0.15,
-  SoundCategory.phone: 0.12,
-  SoundCategory.doorbell: 0.12,
-  SoundCategory.cat: 0.10,
-  SoundCategory.dog: 0.10,
-  SoundCategory.walking: 0.10,
+  // Calibrated for the v0.13.0 5× gain boost. Typical post-gain scores
+  // for confident classifications land in 0.25–0.5; pre-gain
+  // thresholds (0.05–0.15) were swamped by post-gain noise floors.
+  // Sustained
+  SoundCategory.snoring: 0.15,
+  SoundCategory.breathing: 0.10, // denied at YAMNet level, unused
+  SoundCategory.speech: 0.25,
+  SoundCategory.whisper: 0.15,
+  SoundCategory.traffic: 0.20,
+  SoundCategory.weather: 0.25,
+  SoundCategory.music: 0.25,
+  SoundCategory.movementBed: 0.15,
+  // Events — need a cleaner peak to avoid false positives.
+  SoundCategory.sneeze: 0.30,
+  SoundCategory.cough: 0.25,
+  SoundCategory.fart: 0.30,
+  SoundCategory.laugh: 0.25,
+  SoundCategory.cry: 0.25,
+  SoundCategory.scream: 0.30,
+  SoundCategory.passion: 0.25,
+  SoundCategory.alarmClock: 0.30,
+  SoundCategory.alarmHousehold: 0.35,
+  SoundCategory.siren: 0.35,
+  SoundCategory.phone: 0.30,
+  SoundCategory.doorbell: 0.30,
+  SoundCategory.cat: 0.25,
+  SoundCategory.dog: 0.25,
+  SoundCategory.walking: 0.20,
   // Legacy / meta
-  SoundCategory.animal: 0.10,
-  SoundCategory.alarm: 0.12,
-  SoundCategory.movement: 0.08,
+  SoundCategory.animal: 0.25,
+  SoundCategory.alarm: 0.30,
+  SoundCategory.movement: 0.15,
   SoundCategory.silence: 1.0, // never committed via argmax
   SoundCategory.unknown: 1.0,
 };
