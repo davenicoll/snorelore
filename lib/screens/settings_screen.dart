@@ -176,7 +176,8 @@ class _SettingsScreenState extends State<SettingsScreen> {
             windowCategories: result.windowCategories,
             windowCategoriesSecondary: result.windowCategoriesSecondary,
           );
-          await svc.storage.update(updated);
+          final trimmed = await svc.storage.trimToActiveRange(updated);
+          await svc.storage.update(trimmed);
         }
       } catch (_) {}
       progress.value = i + 1;

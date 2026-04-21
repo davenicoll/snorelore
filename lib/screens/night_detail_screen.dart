@@ -103,7 +103,8 @@ class _NightDetailScreenState extends State<NightDetailScreen> {
         windowCategories: result.windowCategories,
         windowCategoriesSecondary: result.windowCategoriesSecondary,
       );
-      await svc.storage.update(updated);
+      final trimmed = await svc.storage.trimToActiveRange(updated);
+      await svc.storage.update(trimmed);
       await _refresh();
       messenger.showSnackBar(
         SnackBar(content: Text('Reclassified as ${result.primary.label}')),
