@@ -61,6 +61,27 @@ class ClassifierService {
   /// threshold.
   static const double _sileroVoiceThreshold = 0.5;
 
+  /// Lower Silero floor for the YAMNet-rescue path. A band that scored
+  /// in [_sileroRescueFloor, _sileroVoiceThreshold) is *not* committed
+  /// to Talking by Silero alone, but YAMNet runs and if its
+  /// Speech-family raw evidence sum exceeds [_speechRescueEvidence] the
+  /// band is rescued to Talking. This catches quiet sleep-talk where
+  /// Silero is borderline but YAMNet's Speech / Conversation /
+  /// Whispering classes still fire.
+  static const double _sileroRescueFloor = 0.35;
+
+  /// Speech-family raw score sum (pre-deny, post-gain) above which we
+  /// consider YAMNet to have voted convincingly for Talking. Used in
+  /// concert with [_sileroRescueFloor] (rescue) and standalone for the
+  /// no-Silero rescue when speech evidence is overwhelming.
+  static const double _speechRescueEvidence = 0.40;
+
+  /// Standalone YAMNet speech rescue: if Silero is unavailable or
+  /// scored below [_sileroRescueFloor] but speech-family evidence is
+  /// very high, still commit to Talking. Bedroom audio rarely produces
+  /// >0.6 sum across Speech/Conversation/Whispering on non-speech.
+  static const double _speechSoloRescueEvidence = 0.55;
+
   final SileroVadService? _silero;
   ClassifierService({SileroVadService? silero}) : _silero = silero;
 
@@ -68,6 +89,7 @@ class ClassifierService {
   List<String> _labels = const [];
   List<SoundCategory> _labelCategories = const [];
   Set<int> _denyListIndices = const {};
+  Set<int> _speechFamilyIndices = const {};
   bool _initialising = false;
 
   /// Pre-inference gain applied to the float32 PCM frame fed to YAMNet,
@@ -118,6 +140,22 @@ class ClassifierService {
     'Whispering',
   };
 
+  /// Subset of [_denyListLabelNames] that are speech-family labels. We
+  /// still zero these out before the per-category collapse (so YAMNet
+  /// Speech can't out-shout Snoring/Pets/Music for the band's argmax),
+  /// but we read their raw scores first to feed the Talking rescue
+  /// path. Without this, a borderline-Silero band where YAMNet's
+  /// Speech labels are firing strongly is silently lost.
+  static const Set<String> _speechFamilyLabelNames = {
+    'Speech',
+    'Child speech, kid speaking',
+    'Conversation',
+    'Narration, monologue',
+    'Babbling',
+    'Speech synthesizer',
+    'Whispering',
+  };
+
   Future<void> init() async {
     if (_interp != null || _initialising) return;
     _initialising = true;
@@ -138,10 +176,13 @@ class ClassifierService {
       _labelCategories =
           _labels.map((l) => mapYamnetLabel(l)).toList(growable: false);
       final deny = <int>{};
+      final speech = <int>{};
       for (var i = 0; i < _labels.length; i++) {
         if (_denyListLabelNames.contains(_labels[i])) deny.add(i);
+        if (_speechFamilyLabelNames.contains(_labels[i])) speech.add(i);
       }
       _denyListIndices = deny;
+      _speechFamilyIndices = speech;
     } catch (e) {
       // Leave _interp null; the caller will gracefully skip classification.
     } finally {
@@ -277,11 +318,16 @@ class ClassifierService {
 
       // Stage 2.5 — Silero VAD gate for the Talking bucket. Silero is a
       // dedicated speech classifier, much more reliable than YAMNet's
-      // Speech class on bedroom audio. If Silero fires above its
-      // idiomatic threshold we commit this band to Talking and skip
-      // YAMNet entirely — saves inference work AND removes the
-      // Speech/Snoring/Breathing sibling fight that was YAMNet's
-      // biggest failure mode on overnight audio.
+      // Speech class on bedroom audio. Three-tier outcome:
+      //   - voiceProb ≥ _sileroVoiceThreshold (0.5): commit Talking,
+      //     skip YAMNet (fast path, existing behaviour).
+      //   - voiceProb in [_sileroRescueFloor, _sileroVoiceThreshold):
+      //     borderline. Run YAMNet, then re-evaluate after speech-family
+      //     evidence is computed (rescue path below).
+      //   - voiceProb < _sileroRescueFloor: ignore Silero, run YAMNet
+      //     normally; only the standalone speech-evidence rescue can
+      //     promote the band to Talking.
+      double bandSileroProb = 0.0;
       final silero = _silero;
       if (silero != null && silero.ready) {
         final bandSamples = Float32List.sublistView(
@@ -292,6 +338,7 @@ class ClassifierService {
         try {
           final voiceProb =
               await silero.voiceProbabilityForBand(bandSamples);
+          bandSileroProb = voiceProb;
           if (voiceProb >= _sileroVoiceThreshold) {
             bandVoice[i] = true;
             bandVoiceProb[i] = voiceProb;
@@ -353,6 +400,31 @@ class ClassifierService {
         }
         inferCount++;
       }
+      // Speech-family rescue: read speech-class scores BEFORE the deny
+      // list zeroes them. Sum, not max, so multiple overlapping speech
+      // labels ('Speech' + 'Conversation' + 'Whispering') reinforce each
+      // other on real talking, while a single isolated false-positive on
+      // 'Speech' alone needs to be strong to clear the rescue floor.
+      var speechEvidence = 0.0;
+      for (final idx in _speechFamilyIndices) {
+        speechEvidence += perBandRaw[i][idx];
+      }
+      // Cap at 1.0 so a band with both Silero and YAMNet voting high
+      // doesn't produce voiceProb > 1.
+      if (speechEvidence > 1.0) speechEvidence = 1.0;
+
+      final sileroBorderline = bandSileroProb >= _sileroRescueFloor &&
+          bandSileroProb < _sileroVoiceThreshold;
+      final rescueByCombo =
+          sileroBorderline && speechEvidence >= _speechRescueEvidence;
+      final rescueBySolo = speechEvidence >= _speechSoloRescueEvidence;
+      if (rescueByCombo || rescueBySolo) {
+        bandVoice[i] = true;
+        bandVoiceProb[i] = math.max(bandSileroProb, speechEvidence);
+        // Fall through to deny-list zeroing so the per-category collapse
+        // (skipped for voice bands anyway) is consistent.
+      }
+
       for (final idx in _denyListIndices) {
         perBandRaw[i][idx] = 0.0;
       }
