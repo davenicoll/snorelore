@@ -30,7 +30,12 @@ class RecordingService : Service() {
         const val ACTION_UPDATE = "com.davenicoll.snorelore.UPDATE"
         const val EXTRA_TITLE = "title"
         const val EXTRA_CONTENT = "content"
-        private const val CHANNEL_ID = "snorelore_recording"
+        // v2 channel id: forces existing installs to pick up the
+        // explicit silent + no-vibration + no-lights config below.
+        // NotificationChannel settings are immutable once created, so
+        // changing the ID is the supported way to roll out new defaults.
+        private const val CHANNEL_ID = "snorelore_recording_v2"
+        private const val LEGACY_CHANNEL_ID = "snorelore_recording"
         private const val CHANNEL_NAME = "SnoreLore recording"
         private const val NOTIFICATION_ID = 1001
         private const val WAKE_LOCK_TAG = "snorelore:recording"
@@ -108,6 +113,12 @@ class RecordingService : Service() {
     private fun ensureChannel() {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) return
         val manager = getSystemService(NotificationManager::class.java) ?: return
+        // Tidy up the v1 channel from prior installs. Safe no-op on fresh installs.
+        if (manager.getNotificationChannel(LEGACY_CHANNEL_ID) != null) {
+            try {
+                manager.deleteNotificationChannel(LEGACY_CHANNEL_ID)
+            } catch (_: Throwable) {}
+        }
         if (manager.getNotificationChannel(CHANNEL_ID) != null) return
         val channel = NotificationChannel(
             CHANNEL_ID,
@@ -116,6 +127,14 @@ class RecordingService : Service() {
         )
         channel.description = "Keeps SnoreLore listening overnight"
         channel.setShowBadge(false)
+        // Overnight-friendly: never vibrate, never make sound, never light
+        // up the lockscreen. IMPORTANCE_LOW is silent on stock Android,
+        // but several OEMs (Xiaomi, OPPO, older OnePlus) ignore the
+        // implicit default and vibrate on first notify. Be explicit.
+        channel.setSound(null, null)
+        channel.enableVibration(false)
+        channel.enableLights(false)
+        channel.lockscreenVisibility = Notification.VISIBILITY_PRIVATE
         manager.createNotificationChannel(channel)
     }
 
