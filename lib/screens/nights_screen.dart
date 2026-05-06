@@ -123,8 +123,13 @@ class _NightCard extends StatelessWidget {
         counts[b] = (counts[b] ?? 0) + 1;
       }
     }
-    final top = counts.entries.toList()
-      ..sort((a, b) => b.value.compareTo(a.value));
+    // Fixed bucket order — Talking is the headline use case so it stays
+    // first regardless of count, matching the Night Detail screen. Buckets
+    // with zero count are dropped.
+    final top = [
+      for (final b in DisplayCategory.values)
+        if ((counts[b] ?? 0) > 0) MapEntry(b, counts[b]!),
+    ];
     final totalDurMs = recordings.fold<int>(0, (s, r) => s + r.durationMs);
     final dur = Duration(milliseconds: totalDurMs);
     final totalLabel = dur.inMinutes >= 1
