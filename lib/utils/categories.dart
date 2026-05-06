@@ -157,7 +157,11 @@ SoundCategory mapYamnetLabel(String name) {
       n.contains('chirp') ||
       n.contains('pigeon') ||
       n.contains('crow') ||
-      n.contains('owl')) {
+      // `n.contains('owl')` would also catch 'howl' (dog) — guard with
+      // an exact match instead. AudioSet's owl labels are 'Owl' and
+      // 'Hoot', neither overlaps with dog vocalisations.
+      n == 'owl' ||
+      n == 'hoot') {
     return SoundCategory.unknown;
   }
 
@@ -201,6 +205,12 @@ SoundCategory mapYamnetLabel(String name) {
       n.contains('wail') ||
       n == 'whimper') {
     return SoundCategory.events;
+  }
+  // 'Whimper (dog)' — the specifically dog-tagged AudioSet label —
+  // routes to pets rather than events. Bare 'Whimper' (above) covers
+  // human whimpers.
+  if (n == 'whimper (dog)') {
+    return SoundCategory.pets;
   }
   if (n.contains('moan') || n.contains('groan')) {
     return SoundCategory.events;
