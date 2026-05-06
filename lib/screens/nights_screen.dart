@@ -162,7 +162,7 @@ class _NightCard extends StatelessWidget {
               Wrap(
                 spacing: 8,
                 runSpacing: 8,
-                children: top.take(5).map((e) {
+                children: top.map((e) {
                   final info = displayCategoryInfo[e.key]!;
                   return Container(
                     padding: const EdgeInsets.symmetric(
