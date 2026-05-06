@@ -244,10 +244,12 @@ SoundCategory mapYamnetLabel(String name) {
   }
 
   // Pets: cat and dog variants.
+  // 'hiss' deliberately excluded — AudioSet's Hiss is a generic sibilance
+  // class (fans, breath, fart tails), not feline hiss. Mapping it to Pets
+  // produces frequent false positives.
   if (n == 'cat' ||
       n == 'purr' ||
       n == 'meow' ||
-      n == 'hiss' ||
       n == 'caterwaul') {
     return SoundCategory.pets;
   }
