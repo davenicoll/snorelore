@@ -253,11 +253,14 @@ SoundCategory mapYamnetLabel(String name) {
       n == 'caterwaul') {
     return SoundCategory.pets;
   }
+  // 'whimper (dog)' substring is unreachable — 'whimper' already routes
+  // to events above. 'canidae' is an AudioSet umbrella class that fires
+  // on a wide range of broadband bedroom noises; the specific child
+  // labels (bark, howl, yip, bow-wow) cover the real-dog case without
+  // the umbrella's false positives.
   if (n == 'dog' ||
       n == 'bark' ||
       n == 'howl' ||
-      n.contains('whimper (dog)') ||
-      n.contains('canidae') ||
       n == 'bow-wow' ||
       n == 'yip') {
     return SoundCategory.pets;
@@ -393,7 +396,7 @@ const Map<SoundCategory, double> categoryCommitThreshold = {
   SoundCategory.snoring: 0.15,
   SoundCategory.talking: 0.25,
   SoundCategory.events: 0.25,
-  SoundCategory.pets: 0.25,
+  SoundCategory.pets: 0.35,
   SoundCategory.music: 0.25,
   SoundCategory.silence: 1.0, // never committed via argmax
   SoundCategory.unknown: 1.0,
@@ -431,7 +434,7 @@ const Map<SoundCategory, int> categoryMedianLen = {
   SoundCategory.snoring: 5,
   SoundCategory.talking: 1, // DCASE uses 1 for Speech
   SoundCategory.events: 1, // punctate — never smooth
-  SoundCategory.pets: 3,
+  SoundCategory.pets: 5,
   SoundCategory.music: 5,
   SoundCategory.silence: 1,
   SoundCategory.unknown: 1,
@@ -543,8 +546,11 @@ DisplayCategory displayCategoryOf(SoundCategory c) {
 }
 
 /// Set of display buckets a recording belongs to — the primary plus
-/// any tag plus any per-segment category. A clip whose primary is
-/// Snoring but contains a real events window shows up under both.
+/// any tag plus any per-segment category that appeared in **at least
+/// two** windows. The two-window floor stops a single isolated
+/// false-positive band from counting the entire clip into a bucket
+/// (e.g. one Hiss-y exhale dragging the clip into Pets), while still
+/// surfacing genuine sub-clip events that span more than one second.
 Set<DisplayCategory> displayCategoriesFor(
     SoundCategory primary,
     List<SoundCategory> tags,
@@ -553,9 +559,14 @@ Set<DisplayCategory> displayCategoriesFor(
   for (final t in tags) {
     out.add(displayCategoryOf(t));
   }
+  final windowBucketCounts = <DisplayCategory, int>{};
   for (final w in windowCategories) {
     if (w == SoundCategory.unknown || w == SoundCategory.silence) continue;
-    out.add(displayCategoryOf(w));
+    final b = displayCategoryOf(w);
+    windowBucketCounts[b] = (windowBucketCounts[b] ?? 0) + 1;
+  }
+  for (final entry in windowBucketCounts.entries) {
+    if (entry.value >= 2) out.add(entry.key);
   }
   return out;
 }
