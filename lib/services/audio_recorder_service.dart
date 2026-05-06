@@ -2,8 +2,8 @@ import 'dart:async';
 import 'dart:collection';
 import 'dart:io';
 import 'dart:math' as math;
-import 'dart:typed_data';
 
+import 'package:flutter/foundation.dart';
 import 'package:record/record.dart';
 import 'package:uuid/uuid.dart';
 
@@ -387,6 +387,7 @@ class AudioRecorderService {
     List<SoundCategory> tags = const [];
     List<SoundCategory> windowCats = const [];
     List<SoundCategory> windowCatsSecondary = const [];
+    var classifierThrew = false;
     try {
       final r = await _classifier.classifyWavFile(wavPath);
       if (r != null) {
@@ -397,7 +398,14 @@ class AudioRecorderService {
         windowCats = r.windowCategories;
         windowCatsSecondary = r.windowCategoriesSecondary;
       }
-    } catch (_) {}
+    } catch (e, st) {
+      classifierThrew = true;
+      // Surface the failure in `flutter logs` so a real bug doesn't
+      // hide behind silent discards. Falls back to keeping the clip
+      // (see classifier-gated save below) so the user doesn't lose
+      // audio to a transient classifier hiccup.
+      debugPrint('classifier threw on $wavPath: $e\n$st');
+    }
 
     // Classifier-gated save. Our amplitude VAD captures any sound above
     // threshold, which means bed movement, fan clicks, and other
@@ -407,9 +415,14 @@ class AudioRecorderService {
     // pattern yet, but we can filter post-capture: if the classifier
     // gave up (primary=unknown, no tags), the clip has nothing YAMNet
     // recognised, so delete the WAV and don't persist the Recording.
+    //
+    // EXCEPTION: if the classifier *threw*, that is a bug, not a
+    // legitimate "nothing recognised" result. Keep the clip with
+    // category=unknown so the user can listen to it manually and so
+    // a real-world failure mode isn't invisibly discarded.
     final classifiable =
         cat != SoundCategory.unknown || tags.isNotEmpty;
-    if (!classifiable) {
+    if (!classifiable && !classifierThrew) {
       try {
         await File(wavPath).delete();
       } catch (_) {}

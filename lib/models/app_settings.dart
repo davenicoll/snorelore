@@ -22,7 +22,7 @@ class AppSettings {
     this.startTime = const TimeOfDay(hour: 22, minute: 30),
     this.endTime = const TimeOfDay(hour: 7, minute: 0),
     this.ignoreFirstMinutes = 20,
-    this.sensitivity = 0.5,
+    this.sensitivity = 0.8,
     this.preRollSeconds = 2,
     this.postRollSeconds = 60,
     this.maxSegmentSeconds = 120,
@@ -86,7 +86,7 @@ class AppSettings {
           minute: j['endMinute'] as int? ?? 0,
         ),
         ignoreFirstMinutes: j['ignoreFirstMinutes'] as int? ?? 20,
-        sensitivity: (j['sensitivity'] as num?)?.toDouble() ?? 0.5,
+        sensitivity: (j['sensitivity'] as num?)?.toDouble() ?? 0.8,
         preRollSeconds: j['preRollSeconds'] as int? ?? 2,
         // Backward compat: old settings used `cooldownSeconds`, now
         // interpreted as the post-roll (time to keep recording after silence).
@@ -101,6 +101,9 @@ class AppSettings {
       );
 
   /// Amplitude threshold in dBFS. At sensitivity=0.0 we only pick up loud
-  /// sounds (>-25 dB); at 1.0 we trigger on quiet sounds (>-55 dB).
+  /// sounds (>-25 dB); at 1.0 we trigger on quiet sounds (>-55 dB). The
+  /// default of 0.8 (≈ -49 dBFS) is biased toward catching quiet
+  /// sleep-talk; the post-capture YAMNet+Silero pipeline filters out
+  /// the resulting non-speech triggers.
   double get amplitudeThresholdDb => -25.0 - (sensitivity * 30.0);
 }
