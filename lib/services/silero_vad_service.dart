@@ -45,17 +45,28 @@ class SileroVadService {
   /// Returns the peak voice probability in [0, 1] seen in any 32 ms
   /// sub-chunk, or 0 if the model isn't loaded or the input is too
   /// short.
-  Future<double> voiceProbabilityForBand(Float32List samples) async {
+  ///
+  /// If [carryState] is supplied, it is used as the initial LSTM hidden
+  /// state and updated in place with the final state after the call —
+  /// this lets a caller carry context across consecutive bands within
+  /// the same clip, which materially improves recall on slurred
+  /// utterances spanning a 1 s band boundary. The buffer must be
+  /// length [_stateSize]; pass a freshly zeroed Float32List at the
+  /// start of each clip.
+  Future<double> voiceProbabilityForBand(
+    Float32List samples, {
+    Float32List? carryState,
+  }) async {
     final session = _session;
     final srValue = _srValue;
     if (session == null || srValue == null) return 0;
     if (samples.length < _chunkSamples) return 0;
 
-    // Fresh per-band state — we don't rely on context from earlier
-    // bands, each 1 s window is classified independently. Simpler than
-    // threading state across bands and avoids state drift over long
-    // silent clips.
-    var state = Float32List(_stateSize);
+    // Either resume from caller-supplied state (clip-level continuity)
+    // or start fresh (legacy per-band behaviour).
+    var state = carryState != null
+        ? Float32List.fromList(carryState)
+        : Float32List(_stateSize);
 
     var maxProb = 0.0;
     final limit = samples.length - (samples.length % _chunkSamples);
@@ -106,8 +117,18 @@ class SileroVadService {
       }
     }
 
+    if (carryState != null && state.length == carryState.length) {
+      for (var i = 0; i < state.length; i++) {
+        carryState[i] = state[i];
+      }
+    }
     return maxProb;
   }
+
+  /// Allocate a fresh per-clip state buffer. Pass into
+  /// [voiceProbabilityForBand] across consecutive bands of the same
+  /// clip to keep LSTM context. Must NOT be reused across clips.
+  Float32List newClipState() => Float32List(_stateSize);
 
   Future<void> dispose() async {
     try {

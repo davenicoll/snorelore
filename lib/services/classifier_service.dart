@@ -283,6 +283,13 @@ class ClassifierService {
         ? _bandSamples
         : (samples.length / numBands).floor();
 
+    // Per-clip Silero state — carried across bands so the LSTM's
+    // contextual cues survive band boundaries. Allocated once per
+    // classification and passed into every voiceProbabilityForBand
+    // call, so a slurred utterance that straddles a 1 s boundary still
+    // benefits from prior frames.
+    final sileroState = _silero?.ready == true ? _silero!.newClipState() : null;
+
     final bandSilent = List<bool>.filled(numBands, false);
     // Bands that Silero VAD committed to the Talking bucket. For these
     // bands we skip YAMNet inference entirely and seed the per-band
@@ -336,8 +343,10 @@ class ClassifierService {
           math.min(bandEnd, samples.length),
         );
         try {
-          final voiceProb =
-              await silero.voiceProbabilityForBand(bandSamples);
+          final voiceProb = await silero.voiceProbabilityForBand(
+            bandSamples,
+            carryState: sileroState,
+          );
           bandSileroProb = voiceProb;
           if (voiceProb >= _sileroVoiceThreshold) {
             bandVoice[i] = true;
