@@ -82,6 +82,12 @@ class ClassifierService {
   /// >0.6 sum across Speech/Conversation/Whispering on non-speech.
   static const double _speechSoloRescueEvidence = 0.55;
 
+  /// Speech-family evidence floor that triggers a secondary Silero
+  /// pass on the gain-boosted samples. Cheap signal that "YAMNet
+  /// thinks there is speech here" gates running Silero a second time;
+  /// without this hint we'd pay the cost on every quiet band.
+  static const double _secondaryGainSileroSpeechFloor = 0.20;
+
   final SileroVadService? _silero;
   ClassifierService({SileroVadService? silero}) : _silero = silero;
 
@@ -422,14 +428,52 @@ class ClassifierService {
       // doesn't produce voiceProb > 1.
       if (speechEvidence > 1.0) speechEvidence = 1.0;
 
-      final sileroBorderline = bandSileroProb >= _sileroRescueFloor &&
-          bandSileroProb < _sileroVoiceThreshold;
+      // Gain-boosted Silero secondary pass. Raw Silero sees un-gained
+      // bedroom audio; quiet sleep-talk that needs the 5× pre-inference
+      // gain to be classifiable by YAMNet is also below Silero's
+      // training-distribution amplitude. Run Silero a second time on
+      // the same gain-boosted (post-tanh-soft-clip) samples YAMNet
+      // saw — but ONLY when YAMNet picked up a meaningful speech hint,
+      // to avoid doubling Silero cost on every band of a quiet night.
+      double secondarySileroProb = 0.0;
+      if (silero != null &&
+          silero.ready &&
+          !bandVoice[i] &&
+          speechEvidence >= _secondaryGainSileroSpeechFloor) {
+        final n = bandEnd - bandStart;
+        final gained = Float32List(n);
+        for (var j = 0; j < n; j++) {
+          final v = samples[bandStart + j] * _preInferenceGain;
+          final e2x = math.exp(2 * v);
+          gained[j] = (e2x - 1) / (e2x + 1);
+        }
+        try {
+          // No carryState — gain-boosted samples diverge from the raw
+          // clip-state stream and would corrupt the LSTM context that
+          // raw-Silero is accumulating across bands.
+          secondarySileroProb =
+              await silero.voiceProbabilityForBand(gained);
+        } catch (_) {}
+      }
+      final effectiveSileroProb =
+          math.max(bandSileroProb, secondarySileroProb);
+
+      // Direct commit if the gain-boosted pass cleared the main
+      // threshold on its own.
+      if (!bandVoice[i] &&
+          secondarySileroProb >= _sileroVoiceThreshold) {
+        bandVoice[i] = true;
+        bandVoiceProb[i] = secondarySileroProb;
+      }
+
+      final sileroBorderline = effectiveSileroProb >= _sileroRescueFloor &&
+          effectiveSileroProb < _sileroVoiceThreshold;
       final rescueByCombo =
           sileroBorderline && speechEvidence >= _speechRescueEvidence;
       final rescueBySolo = speechEvidence >= _speechSoloRescueEvidence;
-      if (rescueByCombo || rescueBySolo) {
+      if (!bandVoice[i] && (rescueByCombo || rescueBySolo)) {
         bandVoice[i] = true;
-        bandVoiceProb[i] = math.max(bandSileroProb, speechEvidence);
+        bandVoiceProb[i] = math.max(effectiveSileroProb, speechEvidence);
         // Fall through to deny-list zeroing so the per-category collapse
         // (skipped for voice bands anyway) is consistent.
       }
