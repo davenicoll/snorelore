@@ -10,6 +10,7 @@ import 'package:share_plus/share_plus.dart';
 
 import '../app_services.dart';
 import '../models/app_settings.dart';
+import '../services/auto_start_service.dart';
 import '../services/fgs_bridge.dart';
 import '../utils/categories.dart';
 import '../utils/theme.dart';
@@ -54,6 +55,24 @@ class _SettingsScreenState extends State<SettingsScreen> {
     await svc.settings.save(s);
     // Apply immediately so changes take effect mid-session.
     svc.recorder.updateSettings(s);
+    // Reschedule the next AlarmManager firing whenever the schedule
+    // settings change. AutoStartService handles the autoSchedule=false
+    // case by cancelling.
+    final fireAt = await AutoStartService().scheduleNext(s);
+    if (s.autoSchedule && fireAt == null && mounted) {
+      // Almost always means Android 12 hasn't granted the exact-alarm
+      // permission yet. Send the user to the system screen.
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: const Text(
+              'Exact alarms not allowed yet. Enable in system settings.'),
+          action: SnackBarAction(
+            label: 'Open',
+            onPressed: () => AutoStartService().openExactAlarmSettings(),
+          ),
+        ),
+      );
+    }
   }
 
   void _onVersionTap() {

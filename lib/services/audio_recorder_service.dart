@@ -12,6 +12,7 @@ import '../models/recording.dart';
 import '../utils/categories.dart';
 import 'classifier_service.dart';
 import 'fgs_bridge.dart';
+import 'session_log_service.dart';
 import 'storage_service.dart';
 
 enum RecorderPhase { idle, listening, capturing }
@@ -84,12 +85,14 @@ class AudioRecorderService {
   final AudioRecorder _recorder = AudioRecorder();
   final StorageService _storage;
   final ClassifierService _classifier;
+  final SessionLogService _sessionLog;
   final _uuid = const Uuid();
 
   StreamSubscription<Uint8List>? _sub;
   bool _running = false;
   Timer? _endTimer;
   Timer? _statusTimer;
+  DateTime _lastChunkLogAt = DateTime.fromMillisecondsSinceEpoch(0);
 
   // Session state
   AppSettings _settings = const AppSettings();
@@ -119,7 +122,7 @@ class AudioRecorderService {
 
   final List<SegmentCallback> _listeners = [];
 
-  AudioRecorderService(this._storage, this._classifier);
+  AudioRecorderService(this._storage, this._classifier, this._sessionLog);
 
   Stream<SessionStatus> get status$ => _statusCtrl.stream;
   SessionStatus get status => _status;
@@ -157,7 +160,39 @@ class AudioRecorderService {
     _sessionEndsAt = endsAt;
     _segmentsCaptured = 0;
     _discardedCaptures = 0;
+
+    await FgsBridge.start();
+    final Stream<Uint8List> stream;
+    try {
+      stream = await _recorder.startStream(const RecordConfig(
+        encoder: AudioEncoder.pcm16bits,
+        sampleRate: _sampleRate,
+        numChannels: 1,
+      ));
+    } catch (e, st) {
+      // startStream failed — leave _running=false so the UI doesn't
+      // claim to be recording when no stream is wired up.
+      debugPrint('recorder.startStream failed: $e\n$st');
+      await FgsBridge.stop();
+      await _sessionLog.markStop(
+        reason: SessionStopReason.startError,
+        detail: e.toString(),
+      );
+      _sessionStartedAt = null;
+      _sessionEndsAt = null;
+      rethrow;
+    }
+    _sub = stream.listen(
+      _onChunk,
+      onError: _onStreamError,
+      onDone: _onStreamDone,
+      cancelOnError: false,
+    );
+
+    // Wired up, mic is open — now we are truly running.
     _running = true;
+    await _sessionLog.markStart(_sessionStartedAt!);
+    _lastChunkLogAt = DateTime.fromMillisecondsSinceEpoch(0);
 
     _status = SessionStatus.idle.copyWith(
       phase: RecorderPhase.listening,
@@ -170,22 +205,40 @@ class AudioRecorderService {
     if (endsAt != null) {
       final dur = endsAt.difference(DateTime.now());
       if (dur.inSeconds > 0) {
-        _endTimer = Timer(dur, () => stop());
+        _endTimer = Timer(
+          dur,
+          () => stop(reason: SessionStopReason.schedule),
+        );
       }
     }
-
-    await FgsBridge.start();
-    final stream = await _recorder.startStream(const RecordConfig(
-      encoder: AudioEncoder.pcm16bits,
-      sampleRate: _sampleRate,
-      numChannels: 1,
-    ));
-    _sub = stream.listen(_onChunk, onError: (_) {}, cancelOnError: false);
 
     _statusTimer = Timer.periodic(const Duration(seconds: 1), (_) => _emit());
   }
 
-  Future<void> stop() async {
+  void _onStreamError(Object error, StackTrace st) {
+    // Surface instead of swallow. A stream error means the OS yanked
+    // the mic (audio focus loss, permission revoke, hardware glitch);
+    // the session is over and we should reflect that.
+    debugPrint('recorder stream error: $error\n$st');
+    unawaited(stop(
+      reason: SessionStopReason.streamError,
+      detail: error.toString(),
+    ));
+  }
+
+  void _onStreamDone() {
+    // The stream completing while we still think we're running means
+    // the OS closed the mic without an error event. Treat the same as
+    // stream_error — session is over, surface a reason.
+    if (!_running) return;
+    debugPrint('recorder stream closed unexpectedly');
+    unawaited(stop(reason: SessionStopReason.streamDone));
+  }
+
+  Future<void> stop({
+    SessionStopReason reason = SessionStopReason.user,
+    String? detail,
+  }) async {
     if (!_running) return;
     _running = false;
     _endTimer?.cancel();
@@ -211,6 +264,11 @@ class AudioRecorderService {
     _preRollBytes = 0;
 
     await FgsBridge.stop();
+    await _sessionLog.markStop(
+      reason: reason,
+      detail: detail,
+      segmentsCaptured: _segmentsCaptured,
+    );
 
     _status = SessionStatus.idle.copyWith(segmentsCaptured: _segmentsCaptured);
     _emit();
@@ -223,8 +281,16 @@ class AudioRecorderService {
 
     // Session end enforced by timer, but also check here for robustness.
     if (_sessionEndsAt != null && now.isAfter(_sessionEndsAt!)) {
-      unawaited(stop());
+      unawaited(stop(reason: SessionStopReason.schedule));
       return;
+    }
+
+    // Breadcrumb: record that the mic is still delivering chunks.
+    // Throttled to ~once a minute so we don't write to disk per sample.
+    if (now.difference(_lastChunkLogAt) > const Duration(seconds: 30)) {
+      _lastChunkLogAt = now;
+      unawaited(_sessionLog.markChunk(now,
+          segmentsCaptured: _segmentsCaptured));
     }
 
     final ignoreEnd =
@@ -249,7 +315,13 @@ class AudioRecorderService {
           ? capAge
           : now.difference(_lastLoudAt!);
       final postRollOver = silence.inSeconds >= _settings.postRollSeconds;
-      final maxReached = capAge.inSeconds >= _settings.maxSegmentSeconds;
+      // Cap on actual audio bytes captured, not wall-clock. Wall-clock
+      // drifts when the mic stream is jittery or the pre-roll buffer
+      // hasn't filled, leading to a clip whose file length doesn't
+      // match the user's max-clip setting. Bytes are what gets written
+      // to disk, so gating on bytes makes the cap a hard cap.
+      final maxBytes = _settings.maxSegmentSeconds * _bytesPerSecond;
+      final maxReached = _captureBytes >= maxBytes;
 
       _status = _status.copyWith(
         phase: RecorderPhase.capturing,
@@ -360,7 +432,13 @@ class AudioRecorderService {
     _dbSamples = 0;
     _waveform.clear();
 
-    final duration = DateTime.now().difference(startedAt);
+    // Derive duration from byte count, not wall-clock. The WAV file
+    // plays at 16 kHz / 16-bit / mono, so its real duration is
+    // determined by sample count. Wall-clock can drift (jittery
+    // chunks, pre-roll fictional past) and reporting it would mismatch
+    // playback length.
+    final durationMs = (bytes * 1000) ~/ _bytesPerSecond;
+    final duration = Duration(milliseconds: durationMs);
     if (duration.inSeconds < _settings.minSegmentSeconds && forced) {
       // Too short; drop it.
       return;
@@ -381,13 +459,39 @@ class AudioRecorderService {
       await sink.close();
     }
 
+    // Save first, classify after. The classifier can take seconds to
+    // run; if we wait for it, the clip doesn't appear in the Nights
+    // list until classification completes. Persist with a placeholder
+    // category, push it to listeners now, then update once YAMNet has
+    // returned.
+    final pending = Recording(
+      id: _uuid.v4(),
+      filePath: wavPath,
+      startedAt: startedAt,
+      durationMs: durationMs,
+      peakDb: peak,
+      avgDb: avgDb,
+      category: SoundCategory.unknown,
+      categoryLabel: 'Analyzing…',
+      categoryConfidence: 0,
+      tags: const [],
+      waveform: wf,
+      windowCategories: const [],
+      windowCategoriesSecondary: const [],
+    );
+    await _storage.add(pending);
+    _segmentsCaptured++;
+    for (final cb in _listeners) {
+      cb(pending);
+    }
+    _emit();
+
     SoundCategory cat = SoundCategory.unknown;
     String catLabel = 'Other';
     double conf = 0;
     List<SoundCategory> tags = const [];
     List<SoundCategory> windowCats = const [];
     List<SoundCategory> windowCatsSecondary = const [];
-    var classifierThrew = false;
     try {
       final r = await _classifier.classifyWavFile(wavPath);
       if (r != null) {
@@ -399,50 +503,17 @@ class AudioRecorderService {
         windowCatsSecondary = r.windowCategoriesSecondary;
       }
     } catch (e, st) {
-      classifierThrew = true;
       // Surface the failure in `flutter logs` so a real bug doesn't
-      // hide behind silent discards. Falls back to keeping the clip
-      // (see classifier-gated save below) so the user doesn't lose
-      // audio to a transient classifier hiccup.
+      // hide behind silent discards. The clip stays as 'Other' so a
+      // transient classifier hiccup doesn't lose audio.
       debugPrint('classifier threw on $wavPath: $e\n$st');
     }
 
-    // Classifier-gated save. Our amplitude VAD captures any sound above
-    // threshold, which means bed movement, fan clicks, and other
-    // un-classifiable noise end up on disk. Sleep Talk Recorder solves
-    // this by making their classifier the VAD — they only record
-    // audio YAMNet was confident about. We don't do their architectural
-    // pattern yet, but we can filter post-capture: if the classifier
-    // gave up (primary=unknown, no tags), the clip has nothing YAMNet
-    // recognised, so delete the WAV and don't persist the Recording.
-    //
-    // EXCEPTION: if the classifier *threw*, that is a bug, not a
-    // legitimate "nothing recognised" result. Keep the clip with
-    // category=unknown so the user can listen to it manually and so
-    // a real-world failure mode isn't invisibly discarded.
-    final classifiable =
-        cat != SoundCategory.unknown || tags.isNotEmpty;
-    if (!classifiable && !classifierThrew) {
-      try {
-        await File(wavPath).delete();
-      } catch (_) {}
-      _discardedCaptures++;
-      _emit();
-      return;
-    }
-
-    var rec = Recording(
-      id: _uuid.v4(),
-      filePath: wavPath,
-      startedAt: startedAt,
-      durationMs: duration.inMilliseconds,
-      peakDb: peak,
-      avgDb: avgDb,
+    var rec = pending.copyWith(
       category: cat,
       categoryLabel: catLabel,
       categoryConfidence: conf,
       tags: tags,
-      waveform: wf,
       windowCategories: windowCats,
       windowCategoriesSecondary: windowCatsSecondary,
     );
@@ -450,8 +521,7 @@ class AudioRecorderService {
     // long post-roll so clips are often mostly silent around the real
     // event.
     rec = await _storage.trimToActiveRange(rec);
-    await _storage.add(rec);
-    _segmentsCaptured++;
+    await _storage.update(rec);
     for (final cb in _listeners) {
       cb(rec);
     }

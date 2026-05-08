@@ -47,4 +47,70 @@ class FgsBridge {
       await _channel.invokeMethod('requestIgnoreBatteryOptimizations');
     } catch (_) {}
   }
+
+  /// Schedule a one-shot AlarmManager broadcast to wake the app at
+  /// [fireAt]. Returns true if the OS accepted the schedule.
+  static Future<bool> scheduleAutoStart(DateTime fireAt) async {
+    if (!Platform.isAndroid) return false;
+    try {
+      final v = await _channel.invokeMethod<bool>(
+        'scheduleAutoStart',
+        {'epochMs': fireAt.millisecondsSinceEpoch},
+      );
+      return v ?? false;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  static Future<void> cancelAutoStart() async {
+    if (!Platform.isAndroid) return;
+    try {
+      await _channel.invokeMethod('cancelAutoStart');
+    } catch (_) {}
+  }
+
+  /// Currently-armed alarm time, or null if nothing is scheduled.
+  static Future<DateTime?> autoStartScheduledAt() async {
+    if (!Platform.isAndroid) return null;
+    try {
+      final v = await _channel.invokeMethod<int>('autoStartScheduledAt');
+      if (v == null) return null;
+      return DateTime.fromMillisecondsSinceEpoch(v);
+    } catch (_) {
+      return null;
+    }
+  }
+
+  /// On API 31+, exact alarms require user grant unless USE_EXACT_ALARM
+  /// applies. False here means we should send the user to settings.
+  static Future<bool> canScheduleExact() async {
+    if (!Platform.isAndroid) return true;
+    try {
+      final v = await _channel.invokeMethod<bool>('canScheduleExact');
+      return v ?? false;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  static Future<void> openExactAlarmSettings() async {
+    if (!Platform.isAndroid) return;
+    try {
+      await _channel.invokeMethod('openExactAlarmSettings');
+    } catch (_) {}
+  }
+
+  /// Returns true once if there's a pending auto-start (either from a
+  /// just-fired alarm or a launch intent extra). The flag is cleared
+  /// on read.
+  static Future<bool> consumePendingAutoStart() async {
+    if (!Platform.isAndroid) return false;
+    try {
+      final v = await _channel.invokeMethod<bool>('consumePendingAutoStart');
+      return v ?? false;
+    } catch (_) {
+      return false;
+    }
+  }
 }
