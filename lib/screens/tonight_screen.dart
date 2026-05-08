@@ -1,13 +1,16 @@
 import 'dart:async';
 
 import 'package:flutter/material.dart';
+import 'package:intl/intl.dart';
 import 'package:permission_handler/permission_handler.dart';
 import 'package:wakelock_plus/wakelock_plus.dart';
 
 import '../app_services.dart';
 import '../models/app_settings.dart';
 import '../services/audio_recorder_service.dart';
+import '../services/auto_start_service.dart';
 import '../services/fgs_bridge.dart';
+import '../services/session_log_service.dart';
 import '../utils/theme.dart';
 
 enum _BatteryChoice { skip, fix }
@@ -22,8 +25,13 @@ class TonightScreen extends StatefulWidget {
 class _TonightScreenState extends State<TonightScreen>
     with TickerProviderStateMixin {
   AppSettings? _settings;
+  DateTime? _autoStartAt;
+  SessionLogEntry? _lastSession;
+  bool _lastSessionDismissed = false;
+  bool _wasRunning = false;
   late final AnimationController _pulse;
   Timer? _clock;
+  StreamSubscription? _statusSub;
 
   @override
   void initState() {
@@ -36,18 +44,49 @@ class _TonightScreenState extends State<TonightScreen>
       if (mounted) setState(() {});
     });
     _load();
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      final rec = AppServices.of(context).recorder;
+      _wasRunning = rec.isRunning;
+      _statusSub = rec.status$.listen(_onStatus);
+    });
   }
 
   @override
   void dispose() {
     _pulse.dispose();
     _clock?.cancel();
+    _statusSub?.cancel();
     super.dispose();
   }
 
+  void _onStatus(SessionStatus st) {
+    final rec = AppServices.of(context).recorder;
+    final running = rec.isRunning;
+    if (_wasRunning && !running) {
+      // Recorder just stopped — most likely the schedule timer fired
+      // overnight. Refresh the diagnostic banner and re-arm tomorrow's
+      // alarm if the user is on auto-schedule.
+      final s = _settings;
+      if (s != null && s.autoSchedule) {
+        unawaited(AutoStartService().scheduleNext(s));
+      }
+      unawaited(_load());
+    }
+    _wasRunning = running;
+  }
+
   Future<void> _load() async {
-    final s = await AppServices.of(context).settings.load();
-    if (mounted) setState(() => _settings = s);
+    final svc = AppServices.of(context);
+    final s = await svc.settings.load();
+    final scheduled = await AutoStartService().currentScheduledAt();
+    final last = await svc.sessionLog.load();
+    if (mounted) {
+      setState(() {
+        _settings = s;
+        _autoStartAt = scheduled;
+        _lastSession = last;
+      });
+    }
   }
 
   Future<_BatteryChoice?> _showBatteryPrompt() {
@@ -94,7 +133,16 @@ class _TonightScreenState extends State<TonightScreen>
     if (rec.isRunning) {
       await rec.stop();
       await WakelockPlus.disable();
-      if (mounted) setState(() {});
+      // Re-arm tomorrow night's alarm if the user is on auto-schedule.
+      // Without this, manually stopping (or stopping after a manual
+      // start) silently drops the schedule going forward.
+      if (s.autoSchedule) {
+        await AutoStartService().scheduleNext(s);
+      }
+      if (mounted) {
+        await _load();
+        setState(() {});
+      }
       return;
     }
 
@@ -120,13 +168,13 @@ class _TonightScreenState extends State<TonightScreen>
       }
     }
 
-    DateTime? endsAt;
-    final now = DateTime.now();
-    if (s.autoSchedule) {
-      var end = DateTime(now.year, now.month, now.day, s.endTime.hour, s.endTime.minute);
-      if (!end.isAfter(now)) end = end.add(const Duration(days: 1));
-      endsAt = end;
-    }
+    // Manual Start while an alarm is armed wins — drop the alarm so it
+    // doesn't double-fire on the next morning.
+    await AutoStartService().cancel();
+
+    final endsAt = s.autoSchedule
+        ? AutoStartService.resolveEnd(s.endTime)
+        : null;
 
     try {
       await rec.start(settings: s, endsAt: endsAt);
@@ -138,7 +186,10 @@ class _TonightScreenState extends State<TonightScreen>
         );
       }
     }
-    if (mounted) setState(() {});
+    if (mounted) {
+      await _load();
+      setState(() {});
+    }
   }
 
   @override
@@ -153,7 +204,15 @@ class _TonightScreenState extends State<TonightScreen>
         return ListView(
           padding: const EdgeInsets.fromLTRB(16, 8, 16, 32),
           children: [
+            if (_lastSessionBanner() != null) ...[
+              _lastSessionBanner()!,
+              const SizedBox(height: 12),
+            ],
             _statusCard(st, s),
+            if (_autoStartBanner(rec.isRunning) != null) ...[
+              const SizedBox(height: 12),
+              _autoStartBanner(rec.isRunning)!,
+            ],
             const SizedBox(height: 16),
             Center(child: _startButton(rec.isRunning, st)),
             const SizedBox(height: 24),
@@ -328,6 +387,116 @@ class _TonightScreenState extends State<TonightScreen>
               )),
         ],
       );
+
+  Widget? _autoStartBanner(bool running) {
+    if (running) return null;
+    final at = _autoStartAt;
+    if (at == null) return null;
+    final fmt = DateFormat.yMMMEd().add_jm();
+    return Card(
+      color: AppColors.teal.withValues(alpha: 0.12),
+      child: Padding(
+        padding: const EdgeInsets.fromLTRB(14, 12, 14, 12),
+        child: Row(
+          children: [
+            const Icon(Icons.alarm_on,
+                color: AppColors.teal, size: 20),
+            const SizedBox(width: 10),
+            Expanded(
+              child: Text(
+                'Will auto-start at ${fmt.format(at)}',
+                style: const TextStyle(
+                    color: AppColors.teal,
+                    fontSize: 13,
+                    fontWeight: FontWeight.w600),
+              ),
+            ),
+            TextButton(
+              onPressed: () async {
+                await AutoStartService().cancel();
+                await _load();
+              },
+              child: const Text('Cancel',
+                  style: TextStyle(color: AppColors.teal)),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget? _lastSessionBanner() {
+    final last = _lastSession;
+    if (last == null || _lastSessionDismissed) return null;
+    if (last.endedCleanly) return null;
+    // The currently-running session also has no endedAt — hide the
+    // banner if the recorder is live so we don't slander an ongoing
+    // session as crashed.
+    if (AppServices.of(context).recorder.isRunning) return null;
+    // Also skip when there's no observable evidence yet of a real
+    // problem (no endedAt, no chunks). markStart leaves the entry in
+    // exactly that state; only flip into "killed" once a chunk arrived
+    // or an explicit stop reason was set.
+    if (last.endedAt == null && last.lastChunkAt == null) return null;
+    // Only nag about the most recent session — once dismissed, don't
+    // re-show after the next clean session.
+    final fmt = DateFormat.jm();
+    final reasonText = switch (last.stopReason) {
+      SessionStopReason.streamError =>
+        'Mic stream errored — likely audio focus loss or permission revoke',
+      SessionStopReason.streamDone =>
+        'Mic stream closed unexpectedly',
+      SessionStopReason.startError =>
+        'Recorder failed to start — ${last.stopDetail ?? "unknown"}',
+      SessionStopReason.unknown ||
+      null =>
+        last.lastChunkAt == null
+            ? 'Session never received audio'
+            : 'App was killed at ${fmt.format(last.lastChunkAt!)}',
+      SessionStopReason.user || SessionStopReason.schedule => null,
+    };
+    if (reasonText == null) return null;
+    return Card(
+      color: AppColors.orange.withValues(alpha: 0.15),
+      child: Padding(
+        padding: const EdgeInsets.fromLTRB(14, 12, 14, 12),
+        child: Row(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            const Icon(Icons.warning_amber_rounded,
+                color: AppColors.orange, size: 20),
+            const SizedBox(width: 10),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    'Last session ended ${fmt.format(last.endedAt ?? last.lastChunkAt ?? last.startedAt)}',
+                    style: const TextStyle(
+                        color: AppColors.orange,
+                        fontSize: 13,
+                        fontWeight: FontWeight.w700),
+                  ),
+                  const SizedBox(height: 2),
+                  Text(
+                    '$reasonText. Captured ${last.segmentsCaptured} clip${last.segmentsCaptured == 1 ? "" : "s"}.',
+                    style: const TextStyle(
+                        color: AppColors.textMuted, fontSize: 12),
+                  ),
+                ],
+              ),
+            ),
+            IconButton(
+              icon: const Icon(Icons.close,
+                  color: AppColors.textMuted, size: 18),
+              onPressed: () =>
+                  setState(() => _lastSessionDismissed = true),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
 
   Widget _tipCard(AppSettings? s) {
     if (s == null) return const SizedBox.shrink();

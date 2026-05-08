@@ -14,6 +14,15 @@ import io.flutter.plugin.common.MethodChannel
 class MainActivity : FlutterActivity() {
     private val channelName = "snorelore/fgs"
 
+    override fun onNewIntent(newIntent: Intent) {
+        super.onNewIntent(newIntent)
+        // Keep the activity's `intent` in sync so consumePendingAutoStart
+        // (and anything else reading `getIntent()`) sees the alarm's
+        // extras even when we're launched on top of an existing
+        // singleTop instance.
+        intent = newIntent
+    }
+
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
         super.configureFlutterEngine(flutterEngine)
         MethodChannel(flutterEngine.dartExecutor.binaryMessenger, channelName)
@@ -52,9 +61,71 @@ class MainActivity : FlutterActivity() {
                         requestIgnoreBatteryOptimizations()
                         result.success(null)
                     }
+                    "scheduleAutoStart" -> {
+                        val at = (call.argument<Number>("epochMs"))?.toLong()
+                        if (at == null) {
+                            result.error("ARG", "epochMs required", null)
+                        } else {
+                            val ok = AutoStartScheduler.schedule(this, at)
+                            result.success(ok)
+                        }
+                    }
+                    "cancelAutoStart" -> {
+                        AutoStartScheduler.cancel(this)
+                        result.success(null)
+                    }
+                    "autoStartScheduledAt" -> {
+                        val at = AutoStartScheduler.scheduledAt(this)
+                        result.success(if (at == 0L) null else at)
+                    }
+                    "canScheduleExact" -> {
+                        result.success(AutoStartScheduler.canScheduleExact(this))
+                    }
+                    "openExactAlarmSettings" -> {
+                        openExactAlarmSettings()
+                        result.success(null)
+                    }
+                    "consumePendingAutoStart" -> {
+                        result.success(consumePendingAutoStart())
+                    }
                     else -> result.notImplemented()
                 }
             }
+    }
+
+    private fun consumePendingAutoStart(): Boolean {
+        val prefs = getSharedPreferences(
+            "FlutterSharedPreferences", Context.MODE_PRIVATE)
+        val pending = prefs.getBoolean(
+            "flutter.snorelore_pending_auto_start", false)
+        // Also check the launch intent — if the activity was created
+        // by the alarm, consume that too.
+        val fromIntent = intent?.getBooleanExtra(
+            "snorelore_auto_start", false) ?: false
+        if (pending || fromIntent) {
+            prefs.edit()
+                .remove("flutter.snorelore_pending_auto_start")
+                .remove("flutter.snorelore_pending_auto_start_at")
+                .apply()
+            return true
+        }
+        return false
+    }
+
+    private fun openExactAlarmSettings() {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.S) return
+        val intent = Intent(Settings.ACTION_REQUEST_SCHEDULE_EXACT_ALARM)
+        intent.data = Uri.parse("package:$packageName")
+        intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        try {
+            startActivity(intent)
+        } catch (_: Throwable) {
+            // Some OEMs don't ship the screen — fall back to app info.
+            val fallback = Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS)
+            fallback.data = Uri.parse("package:$packageName")
+            fallback.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            try { startActivity(fallback) } catch (_: Throwable) {}
+        }
     }
 
     private fun isIgnoringBatteryOptimizations(): Boolean {
